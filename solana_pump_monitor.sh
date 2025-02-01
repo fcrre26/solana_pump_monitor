@@ -438,7 +438,7 @@ def test_nodes_batch(nodes: list) -> list:
 def get_default_nodes():
     """获取默认RPC节点列表"""
     return [
-        ("https://api.mainnet-beta.solana.com", "Solana"),
+        ("https://api.mainnet-beta.solana.com", "Solana Official"),
         ("https://solana-api.projectserum.com", "Project Serum"),
         ("https://rpc.ankr.com/solana", "Ankr"),
         ("https://solana-mainnet.rpc.extrnode.com", "Extrnode"),
@@ -447,7 +447,27 @@ def get_default_nodes():
         ("https://api.solscan.io", "Solscan"),
         ("https://solana.public-rpc.com", "GenesysGo"),
         ("https://ssc-dao.genesysgo.net", "GenesysGo SSC"),
-        ("https://free.rpcpool.com", "RPCPool Free")
+        ("https://free.rpcpool.com", "RPCPool Free"),
+        ("https://api.devnet.solana.com", "Solana Devnet"),
+        ("https://api.testnet.solana.com", "Solana Testnet"),
+        ("https://solana.getblock.io/mainnet", "GetBlock"),
+        ("https://solana-mainnet.g.alchemy.com/v2/demo", "Alchemy Demo"),
+        ("https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff", "Helius"),
+        ("https://neat-hidden-sanctuary.solana-mainnet.discover.quiknode.pro/2af5315d336f9ae920028bbb90a73b724dc1bbed", "QuickNode"),
+        ("https://solana.api.ping.pub", "Ping.pub"),
+        ("https://solana-mainnet-rpc.allthatnode.com", "AllThatNode"),
+        ("https://mainnet.rpcpool.com", "RPCPool Mainnet"),
+        ("https://api.solanium.io", "Solanium"),
+        ("https://api.solana.cloud", "Solana.cloud"),
+        ("https://api.solanaapi.com", "SolanaAPI"),
+        ("https://api.solscan.io", "Solscan API"),
+        ("https://api.solanabeach.io/v1", "Solana Beach"),
+        ("https://api.solflare.com", "Solflare"),
+        ("https://api.solanaexplorer.com", "Solana Explorer"),
+        ("https://api.solanarpc.com", "SolanaRPC"),
+        ("https://api.solananode.com", "SolanaNode"),
+        ("https://api.solanaprime.com", "SolanaPrime"),
+        ("https://api.solanaworld.com", "SolanaWorld")
     ]
 
 def process_nodes(nodes: list, output_file: str):
