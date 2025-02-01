@@ -329,19 +329,12 @@ EOF
 
 # RPC节点管理
 manage_rpc() {
-    # 首先确保目录存在
+    ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
     mkdir -p "$HOME/.solana_pump"
-    
-    # 创建分析文件（如果不存在）
-    ANALYSIS_FILE="$HOME/.solana_pump/detailed_analysis.txt"
-    touch "$ANALYSIS_FILE"
-    
-    # 确保Python依赖已安装
-    pip3 install requests urllib3 >/dev/null 2>&1
     
     while true; do
         echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
-        echo "1. 导入RPC节点列表"
+        echo "1. 导入节点列表"
         echo "2. 查看当前节点"
         echo "3. 测试节点延迟"
         echo "4. 编辑节点列表"
@@ -351,34 +344,31 @@ manage_rpc() {
         
         case $choice in
             1)
-                echo -e "${YELLOW}>>> 请粘贴RPC节点列表到 $ANALYSIS_FILE${RESET}"
-                echo -e "${YELLOW}>>> 完成后按任意键继续...${RESET}"
-                read -n 1
+                echo -e "${YELLOW}>>> 请粘贴节点列表 (格式: IP | 延迟 | 供应商 | 位置)${RESET}"
+                echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
+                cat > "$ANALYSIS_FILE"
                 
                 if [ -f "$ANALYSIS_FILE" ]; then
-                    # 确保目录存在
-                    mkdir -p "$(dirname "$RPC_FILE")"
-                    
-                    # 生成Python处理脚本
+                    # 生成处理脚本
                     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
 #!/usr/bin/env python3
+import os
 import sys
-import json
 import time
+import json
 import requests
-import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone, timedelta
-
-# 设置UTC+8时区
-TZ = timezone(timedelta(hours=8))
 
 def test_node_latency(node, timeout=3, retries=2):
     """
     测试RPC节点延迟和可用性
     返回 (延迟, 是否可用)
     """
-    endpoint = f"https://{node['ip'].strip()}:8899"
+    # 确保IP地址格式正确
+    ip = node['ip'].strip()
+    base_ip = ip.split(':')[0]  # 获取基本IP，不含端口
+    endpoint = f"https://{base_ip}:8899"
+    
     headers = {
         "Content-Type": "application/json"
     }
@@ -414,8 +404,6 @@ def test_node_latency(node, timeout=3, retries=2):
             if response.status_code == 200:
                 slot_result = response.json()
                 if 'result' in slot_result:  # 确认能获取到slot
-                    is_working = True
-                    
                     # 然后测试延迟
                     start_time = time.time()
                     response = requests.post(
@@ -430,36 +418,12 @@ def test_node_latency(node, timeout=3, retries=2):
                     if response.status_code == 200:
                         latency = (end_time - start_time) * 1000
                         latencies.append(latency)
+                        is_working = True
                         
         except Exception as e:
             continue
             
     return (min(latencies) if latencies else 999, is_working)
-
-def test_nodes_batch(nodes, max_workers=20):
-    """并行测试节点"""
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        total = len(nodes)
-        working_count = 0
-        
-        for i, node in enumerate(nodes, 1):
-            future = executor.submit(test_node_latency, node)
-            futures.append((node, future))
-            
-        for i, (node, future) in enumerate(futures, 1):
-            try:
-                latency, is_working = future.result()
-                node['real_latency'] = latency
-                node['is_working'] = is_working
-                if is_working:
-                    working_count += 1
-                status = '\033[32m可用\033[0m' if is_working else '\033[31m不可用\033[0m'
-                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: {latency:6.1f}ms | 状态: {status} | 可用率: {working_count/i*100:5.1f}%", end='\n')
-            except Exception as e:
-                node['real_latency'] = 999
-                node['is_working'] = False
-                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: 999ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
 
 def process_rpc_list(input_file, output_file, batch_size=100):
     """分批处理RPC节点列表"""
@@ -496,9 +460,10 @@ def process_rpc_list(input_file, output_file, batch_size=100):
                     ip = parts[1].strip()
                     
                     # 跳过重复IP
-                    if ip in processed_ips:
+                    base_ip = ip.split(':')[0]  # 获取基本IP，不含端口
+                    if base_ip in processed_ips:
                         continue
-                    processed_ips.add(ip)
+                    processed_ips.add(base_ip)
                     
                     try:
                         reported_latency = float(parts[2].replace('ms', ''))
@@ -512,7 +477,7 @@ def process_rpc_list(input_file, output_file, batch_size=100):
                         'is_working': False,
                         'provider': parts[3].strip(),
                         'location': parts[4].strip() if len(parts) > 4 else 'Unknown',
-                        'endpoint': f"https://{ip}:8899"
+                        'endpoint': f"https://{base_ip}:8899"
                     }
                     
                     batch.append(node)
@@ -560,6 +525,31 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     for node in valid_nodes[:10]:
         status = '\033[32m可用\033[0m' if node.get('is_working', False) else '\033[31m不可用\033[0m'
         print(f"{node['ip']:15} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {status:8} | {node['provider']:15} | {node['location']:30}")
+
+def test_nodes_batch(nodes, max_workers=20):
+    """并行测试节点"""
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        total = len(nodes)
+        working_count = 0
+        
+        for i, node in enumerate(nodes, 1):
+            future = executor.submit(test_node_latency, node)
+            futures.append((node, future))
+            
+        for i, (node, future) in enumerate(futures, 1):
+            try:
+                latency, is_working = future.result()
+                node['real_latency'] = latency
+                node['is_working'] = is_working
+                if is_working:
+                    working_count += 1
+                status = '\033[32m可用\033[0m' if is_working else '\033[31m不可用\033[0m'
+                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: {latency:6.1f}ms | 状态: {status} | 可用率: {working_count/i*100:5.1f}%", end='\n')
+            except Exception as e:
+                node['real_latency'] = 999
+                node['is_working'] = False
+                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: 999.0ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
