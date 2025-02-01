@@ -358,193 +358,77 @@ EOF
 #===========================================
 # RPC节点处理模块
 #===========================================
-generate_rpc_script() {
-    mkdir -p "$HOME/.solana_pump"
-    cat > "$HOME/.solana_pump/process_rpc.py" << 'EOFPY'
-#!/usr/bin/env python3
-import os
-import sys
-import json
-import time
-import requests
-import urllib3
-from concurrent.futures import ThreadPoolExecutor
 
-# 禁用SSL警告
-urllib3.disable_warnings()
+# 默认RPC节点列表
+DEFAULT_RPC_NODES=(
+    "https://api.mainnet-beta.solana.com|Solana Official"
+    "https://solana-api.projectserum.com|Project Serum"
+    "https://rpc.ankr.com/solana|Ankr"
+    "https://solana-mainnet.rpc.extrnode.com|Extrnode" 
+    "https://api.mainnet.rpcpool.com|RPCPool"
+    "https://api.metaplex.solana.com|Metaplex"
+    "https://api.solscan.io|Solscan"
+    "https://solana.public-rpc.com|GenesysGo"
+    "https://ssc-dao.genesysgo.net|GenesysGo SSC"
+    "https://free.rpcpool.com|RPCPool Free"
+    "https://api.devnet.solana.com|Solana Devnet"
+    "https://api.testnet.solana.com|Solana Testnet"
+    "https://solana.getblock.io/mainnet|GetBlock"
+    "https://solana-mainnet.g.alchemy.com/v2/demo|Alchemy Demo"
+    "https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff|Helius"
+    "https://neat-hidden-sanctuary.solana-mainnet.discover.quiknode.pro/2af5315d336f9ae920028bbb90a73b724dc1bbed|QuickNode"
+    "https://solana.api.ping.pub|Ping.pub"
+    "https://solana-mainnet-rpc.allthatnode.com|AllThatNode"
+    "https://mainnet.rpcpool.com|RPCPool Mainnet"
+    "https://api.solanium.io|Solanium"
+    "https://api.solana.cloud|Solana.cloud"
+    "https://api.solanaapi.com|SolanaAPI"
+    "https://api.solscan.io|Solscan API"
+    "https://api.solanabeach.io/v1|Solana Beach"
+    "https://api.solflare.com|Solflare"
+    "https://api.solanaexplorer.com|Solana Explorer"
+    "https://api.solanarpc.com|SolanaRPC"
+    "https://api.solananode.com|SolanaNode"
+    "https://api.solanaprime.com|SolanaPrime"
+    "https://api.solanaworld.com|SolanaWorld"
+)
 
-class RPCNode:
-    def __init__(self, ip: str, provider: str = "Unknown"):
-        self.ip = ip.strip()
-        if not self.ip.startswith(('http://', 'https://')):
-            self.ip = f"https://{self.ip}"
-        self.provider = provider.strip()
-        self.real_latency = float('inf')
-        self.health_score = 0
-
-    def to_dict(self):
-        return {
-            "endpoint": self.ip,
-            "provider": self.provider,
-            "latency": self.real_latency,
-            "health": self.health_score
-        }
-
-def test_node_health(node: RPCNode, timeout: int = 5) -> bool:
-    """测试节点健康状态"""
-    try:
-        start_time = time.time()
-        
-        # 基本连接测试
-        resp = requests.post(
-            node.ip,
-            json={"jsonrpc":"2.0","id":1,"method":"getHealth"},
-            timeout=timeout,
-            verify=False
-        )
-        if resp.status_code != 200:
-            return False
-            
-        # 计算延迟和健康分
-        node.real_latency = (time.time() - start_time) * 1000
-        node.health_score = 100 if node.real_latency < 1000 else max(0, 100 - (node.real_latency - 1000) / 100)
-        
-        return True
-    except:
-        return False
-
-def test_nodes_batch(nodes: list) -> list:
-    """批量测试节点"""
-    working_nodes = []
-    total = len(nodes)
+# 测试RPC节点延迟和可用性
+test_rpc_node() {
+    local endpoint="$1"
+    local provider="$2"
+    local timeout=5
     
-    print(f"\n\033[33m>>> 开始测试 {total} 个节点...\033[0m")
+    # 构建测试请求
+    local request='{
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getHealth"
+    }'
     
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = []
-        for node in nodes:
-            futures.append(executor.submit(test_node_health, node))
-        
-        for i, future in enumerate(futures):
-            try:
-                if future.result():
-                    working_nodes.append(nodes[i])
-                print(f"\r进度: {i+1}/{total}", end="", flush=True)
-            except:
-                continue
+    # 测试节点
+    local start_time=$(date +%s.%N)
+    local response=$(curl -s -X POST -H "Content-Type: application/json" \
+                    -d "$request" \
+                    --connect-timeout $timeout \
+                    "$endpoint" 2>/dev/null)
+    local end_time=$(date +%s.%N)
     
-    return working_nodes
-
-def get_default_nodes():
-    """获取默认RPC节点列表"""
-    return [
-        ("https://api.mainnet-beta.solana.com", "Solana Official"),
-        ("https://solana-api.projectserum.com", "Project Serum"),
-        ("https://rpc.ankr.com/solana", "Ankr"),
-        ("https://solana-mainnet.rpc.extrnode.com", "Extrnode"),
-        ("https://api.mainnet.rpcpool.com", "RPCPool"),
-        ("https://api.metaplex.solana.com", "Metaplex"),
-        ("https://api.solscan.io", "Solscan"),
-        ("https://solana.public-rpc.com", "GenesysGo"),
-        ("https://ssc-dao.genesysgo.net", "GenesysGo SSC"),
-        ("https://free.rpcpool.com", "RPCPool Free"),
-        ("https://api.devnet.solana.com", "Solana Devnet"),
-        ("https://api.testnet.solana.com", "Solana Testnet"),
-        ("https://solana.getblock.io/mainnet", "GetBlock"),
-        ("https://solana-mainnet.g.alchemy.com/v2/demo", "Alchemy Demo"),
-        ("https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff", "Helius"),
-        ("https://neat-hidden-sanctuary.solana-mainnet.discover.quiknode.pro/2af5315d336f9ae920028bbb90a73b724dc1bbed", "QuickNode"),
-        ("https://solana.api.ping.pub", "Ping.pub"),
-        ("https://solana-mainnet-rpc.allthatnode.com", "AllThatNode"),
-        ("https://mainnet.rpcpool.com", "RPCPool Mainnet"),
-        ("https://api.solanium.io", "Solanium"),
-        ("https://api.solana.cloud", "Solana.cloud"),
-        ("https://api.solanaapi.com", "SolanaAPI"),
-        ("https://api.solscan.io", "Solscan API"),
-        ("https://api.solanabeach.io/v1", "Solana Beach"),
-        ("https://api.solflare.com", "Solflare"),
-        ("https://api.solanaexplorer.com", "Solana Explorer"),
-        ("https://api.solanarpc.com", "SolanaRPC"),
-        ("https://api.solananode.com", "SolanaNode"),
-        ("https://api.solanaprime.com", "SolanaPrime"),
-        ("https://api.solanaworld.com", "SolanaWorld")
-    ]
-
-def process_nodes(nodes: list, output_file: str):
-    """处理RPC节点列表"""
-    working_nodes = test_nodes_batch(nodes)
+    # 计算延迟(ms)
+    local latency=$(echo "($end_time - $start_time) * 1000" | bc)
     
-    if working_nodes:
-        # 按延迟排序
-        working_nodes.sort(key=lambda x: x.real_latency)
-        
-        # 保存结果
-        with open(output_file, 'w') as f:
-            for node in working_nodes:
-                f.write(json.dumps(node.to_dict()) + '\n')
-        
-        print(f"\n\033[32m✓ 已找到 {len(working_nodes)} 个可用节点")
-        print(f"\n最佳RPC节点 (前3个):")
-        print('=' * 80)
-        print(f"{'节点地址':50} | {'延迟':8} | {'供应商':15}")
-        print('-' * 80)
-        
-        for node in working_nodes[:3]:
-            print(f"{node.ip:50} | {node.real_latency:6.1f}ms | {node.provider:15}")
-    else:
-        print("\n\033[31m错误: 没有找到可用的节点\033[0m")
-        return False
-    return True
-
-def main(input_file: str, output_file: str, use_default: bool = True):
-    nodes = []
-    
-    # 读取自定义节点
-    if os.path.exists(input_file):
-        with open(input_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                parts = [p.strip() for p in line.split('|')]
-                if len(parts) >= 2:
-                    nodes.append(RPCNode(parts[0], parts[1]))
-    
-    # 添加默认节点
-    if use_default:
-        for ip, provider in get_default_nodes():
-            nodes.append(RPCNode(ip, provider))
-    
-    if not nodes:
-        print("\n\033[31m错误: 没有找到任何节点\033[0m")
-        return False
-    
-    return process_nodes(nodes, output_file)
-
-if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print("Usage: python3 process_rpc.py input_file output_file [--no-default]")
-        sys.exit(1)
-    
-    try:
-        input_file = sys.argv[1]
-        output_file = sys.argv[2]
-        use_default = "--no-default" not in sys.argv
-        if not main(input_file, output_file, use_default):
-            sys.exit(1)
-    except Exception as e:
-        print(f"\n\033[31m错误: {e}\033[0m")
-        sys.exit(1)
-EOFPY
-
-    chmod +x "$HOME/.solana_pump/process_rpc.py"
-    echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
+    # 检查响应
+    if [ ! -z "$response" ] && [[ "$response" == *"result"* ]]; then
+        echo "$endpoint|$provider|$latency"
+        return 0
+    fi
+    return 1
 }
 
 # RPC节点管理主函数
 manage_rpc() {
-    RPC_FILE="$HOME/.solana_pump/rpc.txt"
-    CUSTOM_NODES="$HOME/.solana_pump/custom_nodes.txt"
+    local RPC_FILE="$HOME/.solana_pump/rpc.txt"
+    local CUSTOM_NODES="$HOME/.solana_pump/custom_nodes.txt"
     mkdir -p "$HOME/.solana_pump"
     
     while true; do
@@ -559,14 +443,16 @@ manage_rpc() {
         
         case $choice in
             1)
-                echo -e "${YELLOW}>>> 请输入RPC节点信息 (格式: IP | 供应商)${RESET}"
+                echo -e "${YELLOW}>>> 请输入RPC节点信息 (格式: endpoint|provider)${RESET}"
                 echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
                 cat > "$CUSTOM_NODES"
-                python3 "$HOME/.solana_pump/process_rpc.py" "$CUSTOM_NODES" "$RPC_FILE" --no-default
+                test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
                 ;;
             2)
                 if [ -f "$RPC_FILE" ]; then
                     echo -e "\n${YELLOW}>>> 当前RPC节点列表：${RESET}"
+                    echo -e "节点地址|供应商|延迟(ms)"
+                    echo "----------------------------------------"
                     cat "$RPC_FILE"
                 else
                     echo -e "${RED}>>> RPC节点列表为空${RESET}"
@@ -575,14 +461,14 @@ manage_rpc() {
             3)
                 echo -e "${YELLOW}>>> 开始测试节点延迟...${RESET}"
                 if [ -f "$CUSTOM_NODES" ]; then
-                    python3 "$HOME/.solana_pump/process_rpc.py" "$CUSTOM_NODES" "$RPC_FILE"
+                    test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
                 else
-                    python3 "$HOME/.solana_pump/process_rpc.py" "/dev/null" "$RPC_FILE"
+                    test_default_nodes "$RPC_FILE"
                 fi
                 ;;
             4)
                 echo -e "${YELLOW}>>> 使用默认RPC节点...${RESET}"
-                python3 "$HOME/.solana_pump/process_rpc.py" "/dev/null" "$RPC_FILE"
+                test_default_nodes "$RPC_FILE"
                 ;;
             5)
                 return
@@ -592,6 +478,56 @@ manage_rpc() {
                 ;;
         esac
     done
+}
+
+# 测试所有节点
+test_all_nodes() {
+    local input_file="$1"
+    local output_file="$2"
+    local total_nodes=0
+    local working_nodes=0
+    
+    # 清空输出文件
+    > "$output_file"
+    
+    echo -e "\n${YELLOW}>>> 开始测试节点...${RESET}"
+    
+    # 读取并测试节点
+    while IFS="|" read -r endpoint provider || [ -n "$endpoint" ]; do
+        [ -z "$endpoint" ] && continue
+        ((total_nodes++))
+        echo -ne "\r测试进度: $total_nodes"
+        
+        if result=$(test_rpc_node "$endpoint" "$provider"); then
+            echo "$result" >> "$output_file"
+            ((working_nodes++))
+        fi
+    done < "$input_file"
+    
+    # 按延迟排序
+    if [ -f "$output_file" ]; then
+        sort -t"|" -k3 -n "$output_file" -o "$output_file"
+    fi
+    
+    echo -e "\n\n${GREEN}✓ 测试完成"
+    echo "总节点数: $total_nodes"
+    echo "可用节点数: $working_nodes"
+    echo -e "可用率: $(( working_nodes * 100 / total_nodes ))%${RESET}"
+}
+
+# 测试默认节点
+test_default_nodes() {
+    local output_file="$1"
+    local temp_file="/tmp/default_nodes.txt"
+    
+    # 写入默认节点到临时文件
+    printf "%s\n" "${DEFAULT_RPC_NODES[@]}" > "$temp_file"
+    
+    # 测试节点
+    test_all_nodes "$temp_file" "$output_file"
+    
+    # 清理临时文件
+    rm -f "$temp_file"
 }
 
 #===========================================
