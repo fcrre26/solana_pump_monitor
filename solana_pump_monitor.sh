@@ -452,6 +452,9 @@ manage_watch_addresses() {
 #===========================================
 # RPC节点处理模块
 #===========================================
+#===========================================
+# RPC节点处理模块
+#===========================================
 # 全局配置
 RPC_DIR="$HOME/.solana_pump"
 RPC_FILE="$RPC_DIR/rpc.txt"
@@ -459,15 +462,10 @@ CUSTOM_NODES="$RPC_DIR/custom_nodes.txt"
 BEST_RPC="$RPC_DIR/best_rpc.txt"
 PYTHON_RPC="$HOME/.solana_pump.rpc"
 
-# 状态指示图标
-STATUS_OK="🟢"
-STATUS_SLOW="🟡"
-STATUS_ERROR="🔴"
-
-# 节点类型标识
-NODE_TYPE_OFFICIAL="[官方]"
-NODE_TYPE_PUBLIC="[公共]"
-NODE_TYPE_CUSTOM="[自定义]"
+# 状态指示图标 (使用ASCII字符替代emoji)
+STATUS_OK="[OK]"      # 替换 🟢
+STATUS_SLOW="[!!]"    # 替换 🟡
+STATUS_ERROR="[XX]"   # 替换 🔴
 
 # 延迟阈值(毫秒)
 LATENCY_GOOD=500    # 良好延迟阈值
@@ -475,48 +473,34 @@ LATENCY_WARN=1000   # 警告延迟阈值
 
 # 默认RPC节点列表
 DEFAULT_RPC_NODES=(
-    "https://api.mainnet-beta.solana.com|Solana Official"
-    "https://solana-api.projectserum.com|Project Serum"
-    "https://rpc.ankr.com/solana|Ankr"
-    "https://solana-mainnet.rpc.extrnode.com|Extrnode" 
-    "https://api.mainnet.rpcpool.com|RPCPool"
-    "https://api.metaplex.solana.com|Metaplex"
-    "https://api.solscan.io|Solscan"
-    "https://solana.public-rpc.com|GenesysGo"
-    "https://ssc-dao.genesysgo.net|GenesysGo SSC"
-    "https://free.rpcpool.com|RPCPool Free"
-    "https://api.devnet.solana.com|Solana Devnet"
-    "https://api.testnet.solana.com|Solana Testnet"
-    "https://solana.getblock.io/mainnet|GetBlock"
-    "https://solana-mainnet.g.alchemy.com/v2/demo|Alchemy Demo"
-    "https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff|Helius"
-    "https://neat-hidden-sanctuary.solana-mainnet.discover.quiknode.pro/2af5315d336f9ae920028bbb90a73b724dc1bbed|QuickNode"
-    "https://solana.api.ping.pub|Ping.pub"
-    "https://solana-mainnet-rpc.allthatnode.com|AllThatNode"
-    "https://mainnet.rpcpool.com|RPCPool Mainnet"
-    "https://api.solanium.io|Solanium"
+    "https://api.mainnet-beta.solana.com"
+    "https://solana-api.projectserum.com"
+    "https://rpc.ankr.com/solana"
+    "https://solana-mainnet.rpc.extrnode.com"
+    "https://api.mainnet.rpcpool.com"
+    "https://api.metaplex.solana.com"
+    "https://api.solscan.io"
+    "https://solana.public-rpc.com"
 )
 
 # 初始化RPC配置
 init_rpc_config() {
     mkdir -p "$RPC_DIR"
+    
+    # 确保Python RPC配置文件存在
+    if [ ! -f "$PYTHON_RPC" ]; then
+        echo "https://api.mainnet-beta.solana.com" > "$PYTHON_RPC"
+    fi
+    
+    # 确保其他配置文件存在
+    touch "$RPC_FILE"
     touch "$CUSTOM_NODES"
-    
-    if [ ! -f "$RPC_FILE" ] || [ ! -s "$RPC_FILE" ]; then
-        test_default_nodes "$RPC_FILE"
-    fi
-    
-    # 确保最佳节点文件存在
-    if [ ! -f "$BEST_RPC" ] || [ ! -s "$BEST_RPC" ]; then
-        head -n 1 "$RPC_FILE" > "$BEST_RPC"
-        cp "$BEST_RPC" "$PYTHON_RPC"
-    fi
+    touch "$BEST_RPC"
 }
 
 # 测试RPC节点延迟和可用性
 test_rpc_node() {
     local endpoint="$1"
-    local provider="$2"
     local timeout=5
     
     # 构建测试请求
@@ -537,18 +521,8 @@ test_rpc_node() {
     # 计算延迟(ms)
     local latency=$(echo "($end_time - $start_time) * 1000" | bc)
     
-    # 确定状态图标和节点类型
-    local status
-    local type
-    if [[ "$provider" == *"Official"* ]]; then
-        type="$NODE_TYPE_OFFICIAL"
-    elif [[ "$endpoint" == *"custom"* ]]; then
-        type="$NODE_TYPE_CUSTOM"
-    else
-        type="$NODE_TYPE_PUBLIC"
-    fi
-    
     if [ ! -z "$response" ] && [[ "$response" == *"result"* ]]; then
+        local status
         if (( $(echo "$latency < $LATENCY_GOOD" | bc -l) )); then
             status="$STATUS_OK"
         elif (( $(echo "$latency < $LATENCY_WARN" | bc -l) )); then
@@ -556,7 +530,7 @@ test_rpc_node() {
         else
             status="$STATUS_ERROR"
         fi
-        echo "$endpoint|$provider|$latency|$status|$type"
+        echo "$endpoint|$latency|$status"
         return 0
     fi
     return 1
@@ -564,96 +538,61 @@ test_rpc_node() {
 
 # 测试所有节点
 test_all_nodes() {
-    local input_file="$1"
-    local output_file="$2"
-    local total_nodes=0
-    local working_nodes=0
-    local good_nodes=0
-    local slow_nodes=0
-    
-    # 清空输出文件
-    > "$output_file"
+    local temp_file="$RPC_DIR/temp_results.txt"
+    > "$temp_file"
     
     echo -e "\n${YELLOW}>>> 开始测试节点...${RESET}"
+    local total=0
+    local success=0
     
-    # 读取并测试节点
-    while IFS="|" read -r endpoint provider || [ -n "$endpoint" ]; do
-        [ -z "$endpoint" ] && continue
-        ((total_nodes++))
-        echo -ne "\r测试进度: $total_nodes"
-        
-        if result=$(test_rpc_node "$endpoint" "$provider"); then
-            echo "$result" >> "$output_file"
-            ((working_nodes++))
-            
-            # 统计节点状态
-            if [[ "$result" == *"$STATUS_OK"* ]]; then
-                ((good_nodes++))
-            elif [[ "$result" == *"$STATUS_SLOW"* ]]; then
-                ((slow_nodes++))
-            fi
+    # 测试默认节点
+    for endpoint in "${DEFAULT_RPC_NODES[@]}"; do
+        ((total++))
+        echo -ne "\r测试进度: $total"
+        if result=$(test_rpc_node "$endpoint"); then
+            echo "$result" >> "$temp_file"
+            ((success++))
         fi
-    done < "$input_file"
-    
-    # 按延迟排序
-    if [ -f "$output_file" ]; then
-        sort -t"|" -k3 -n "$output_file" -o "$output_file"
-    fi
-    
-    echo -e "\n\n${GREEN}✓ 测试完成"
-    echo "总节点数: $total_nodes"
-    echo "可用节点数: $working_nodes"
-    echo "良好节点数: $good_nodes"
-    echo "较慢节点数: $slow_nodes"
-    echo -e "可用率: $(( working_nodes * 100 / total_nodes ))%${RESET}"
-    
-    # 显示最佳节点
-    if [ $working_nodes -gt 0 ]; then
-        echo -e "\n最佳节点 (延迟<${LATENCY_GOOD}ms):"
-        echo "------------------------------------------------"
-        head -n 5 "$output_file" | while IFS="|" read -r endpoint provider latency status type; do
-            if (( $(echo "$latency < $LATENCY_GOOD" | bc -l) )); then
-                printf "%-4s %-8s %7.1f  %-15s %s\n" \
-                    "$status" "$type" "$latency" "$provider" "$endpoint"
-            fi
-        done
-    fi
-}
-
-# 测试默认节点
-test_default_nodes() {
-    local output_file="$1"
-    local temp_file="$RPC_DIR/temp_nodes.txt"
-    
-    # 确保目录存在
-    mkdir -p "$RPC_DIR"
-    
-    # 写入默认节点到临时文件
-    > "$temp_file"
-    for node in "${DEFAULT_RPC_NODES[@]}"; do
-        echo "$node" >> "$temp_file"
     done
     
-    # 测试节点
-    test_all_nodes "$temp_file" "$output_file"
+    # 测试自定义节点
+    if [ -f "$CUSTOM_NODES" ]; then
+        while read -r endpoint; do
+            [ -z "$endpoint" ] && continue
+            ((total++))
+            echo -ne "\r测试进度: $total"
+            if result=$(test_rpc_node "$endpoint"); then
+                echo "$result" >> "$temp_file"
+                ((success++))
+            fi
+        done < "$CUSTOM_NODES"
+    fi
     
-    # 清理临时文件
+    # 按延迟排序并保存结果
+    if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
+        sort -t"|" -k2 -n "$temp_file" -o "$RPC_FILE"
+        # 保存最佳节点
+        head -n 1 "$RPC_FILE" | cut -d"|" -f1 > "$PYTHON_RPC"
+        head -n 1 "$RPC_FILE" > "$BEST_RPC"
+    else
+        # 如果没有可用节点，使用默认节点
+        echo "https://api.mainnet-beta.solana.com" > "$PYTHON_RPC"
+    fi
+    
     rm -f "$temp_file"
     
-    # 保存最佳节点
-    if [ -f "$output_file" ] && [ -s "$output_file" ]; then
-        # 保存最佳节点
-        head -n 1 "$output_file" > "$BEST_RPC"
-        # 复制到Python脚本使用的位置
-        cp "$BEST_RPC" "$PYTHON_RPC"
-        echo -e "${GREEN}✓ RPC配置已更新${RESET}"
-        
-        # 显示当前使用的节点
-        local endpoint provider latency status type
-        IFS="|" read -r endpoint provider latency status type < "$BEST_RPC"
-        echo -e "${GREEN}✓ 当前使用: $provider ($endpoint)${RESET}"
-    else
-        echo -e "${RED}✗ RPC配置更新失败${RESET}"
+    echo -e "\n\n${GREEN}✓ 测试完成"
+    echo "总节点数: $total"
+    echo "可用节点数: $success"
+    echo -e "可用率: $(( success * 100 / total ))%${RESET}"
+    
+    # 显示最佳节点
+    if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
+        echo -e "\n最佳节点 (延迟<${LATENCY_GOOD}ms):"
+        echo "------------------------------------------------"
+        head -n 5 "$RPC_FILE" | while IFS="|" read -r endpoint latency status; do
+            printf "%-4s %7.1f ms  %s\n" "$status" "$latency" "$endpoint"
+        done
     fi
 }
 
@@ -662,31 +601,91 @@ add_custom_node() {
     echo -e "${YELLOW}>>> 添加自定义RPC节点${RESET}"
     echo -n "请输入节点地址: "
     read endpoint
-    echo -n "请输入节点供应商: "
-    read provider
     
     if [ ! -z "$endpoint" ]; then
-        # 确保目录和文件存在
-        mkdir -p "$RPC_DIR"
-        touch "$CUSTOM_NODES"
-        
-        # 添加新节点
-        echo "$endpoint|$provider" >> "$CUSTOM_NODES"
-        echo -e "${GREEN}✓ 节点已添加${RESET}"
-        
-        # 测试所有节点（包括新添加的）
-        test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
-        
-        # 保存最佳节点
-        if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
-            head -n 1 "$RPC_FILE" > "$BEST_RPC"
-            cp "$BEST_RPC" "$PYTHON_RPC"
-            
-            # 显示当前使用的节点
-            local endpoint provider latency status type
-            IFS="|" read -r endpoint provider latency status type < "$BEST_RPC"
-            echo -e "${GREEN}✓ 当前使用: $provider ($endpoint)${RESET}"
+        # 验证节点格式
+        if [[ ! "$endpoint" =~ ^https?:// ]]; then
+            echo -e "${RED}错误: 无效的节点地址格式，必须以 http:// 或 https:// 开头${RESET}"
+            return
         fi
+        
+        # 检查是否已存在
+        if grep -q "^$endpoint$" "$CUSTOM_NODES" 2>/dev/null; then
+            echo -e "${YELLOW}该节点已存在${RESET}"
+            return
+        fi
+        
+        # 测试节点连接
+        echo -e "${YELLOW}正在测试节点连接...${RESET}"
+        if result=$(test_rpc_node "$endpoint"); then
+            echo "$endpoint" >> "$CUSTOM_NODES"
+            echo -e "${GREEN}✓ 节点已添加并测试通过${RESET}"
+            test_all_nodes
+        else
+            echo -e "${RED}✗ 节点连接测试失败${RESET}"
+        fi
+    fi
+}
+
+# 删除自定义节点
+delete_custom_node() {
+    if [ ! -f "$CUSTOM_NODES" ] || [ ! -s "$CUSTOM_NODES" ]; then
+        echo -e "${RED}>>> 没有自定义节点${RESET}"
+        return
+    fi
+    
+    echo -e "\n${YELLOW}>>> 当前自定义节点：${RESET}"
+    nl -w3 -s". " "$CUSTOM_NODES"
+    echo -n "请输入要删除的节点编号 (输入 0 取消): "
+    read num
+    
+    if [ "$num" = "0" ]; then
+        echo -e "${YELLOW}已取消删除${RESET}"
+        return
+    fi
+    
+    if [[ $num =~ ^[0-9]+$ ]]; then
+        local total_lines=$(wc -l < "$CUSTOM_NODES")
+        if [ "$num" -le "$total_lines" ]; then
+            local node_to_delete=$(sed "${num}!d" "$CUSTOM_NODES")
+            sed -i "${num}d" "$CUSTOM_NODES"
+            echo -e "${GREEN}✓ 已删除节点: $node_to_delete${RESET}"
+            test_all_nodes
+        else
+            echo -e "${RED}错误: 无效的节点编号${RESET}"
+        fi
+    else
+        echo -e "${RED}错误: 请输入有效的数字${RESET}"
+    fi
+}
+
+# 查看当前节点
+view_current_nodes() {
+    echo -e "\n${YELLOW}>>> RPC节点状态：${RESET}"
+    
+    # 显示当前使用的节点
+    if [ -f "$PYTHON_RPC" ]; then
+        local current_node=$(cat "$PYTHON_RPC")
+        echo -e "\n${GREEN}当前使用的节点:${RESET}"
+        echo "$current_node"
+    fi
+    
+    # 显示所有节点列表
+    if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
+        echo -e "\n所有可用节点:"
+        echo -e "状态   延迟(ms)  节点地址"
+        echo "------------------------------------------------"
+        while IFS="|" read -r endpoint latency status; do
+            printf "%-4s %7.1f ms  %s\n" "$status" "$latency" "$endpoint"
+        done < "$RPC_FILE"
+    else
+        echo -e "${YELLOW}>>> 没有测试过的节点记录${RESET}"
+    fi
+    
+    # 显示自定义节点
+    if [ -f "$CUSTOM_NODES" ] && [ -s "$CUSTOM_NODES" ]; then
+        echo -e "\n自定义节点列表:"
+        nl -w3 -s". " "$CUSTOM_NODES"
     fi
 }
 
@@ -711,81 +710,17 @@ manage_rpc() {
                 add_custom_node
                 ;;
             2)
-                if [ -f "$RPC_FILE" ]; then
-                    echo -e "\n${YELLOW}>>> 当前RPC节点列表：${RESET}"
-                    echo -e "状态 类型    延迟(ms)  供应商          节点地址"
-                    echo "------------------------------------------------"
-                    while IFS="|" read -r endpoint provider latency status type; do
-                        printf "%-4s %-8s %7.1f  %-15s %s\n" \
-                            "$status" "$type" "$latency" "$provider" "$endpoint"
-                    done < "$RPC_FILE"
-                    
-                    # 显示当前使用的节点
-                    if [ -f "$BEST_RPC" ]; then
-                        echo -e "\n${GREEN}当前使用的节点:${RESET}"
-                        IFS="|" read -r endpoint provider latency status type < "$BEST_RPC"
-                        echo -e "${GREEN}$provider ($endpoint)${RESET}"
-                    fi
-                else
-                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
-                fi
+                view_current_nodes
                 ;;
             3)
-                echo -e "${YELLOW}>>> 开始测试节点延迟...${RESET}"
-                if [ -f "$CUSTOM_NODES" ] && [ -s "$CUSTOM_NODES" ]; then
-                    test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
-                else
-                    test_default_nodes "$RPC_FILE"
-                fi
-                
-                # 更新最佳节点
-                if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
-                    head -n 1 "$RPC_FILE" > "$BEST_RPC"
-                    cp "$BEST_RPC" "$PYTHON_RPC"
-                    
-                    # 显示当前使用的节点
-                    local endpoint provider latency status type
-                    IFS="|" read -r endpoint provider latency status type < "$BEST_RPC"
-                    echo -e "${GREEN}✓ 当前使用: $provider ($endpoint)${RESET}"
-                fi
+                test_all_nodes
                 ;;
             4)
                 echo -e "${YELLOW}>>> 使用默认RPC节点...${RESET}"
-                test_default_nodes "$RPC_FILE"
+                test_all_nodes
                 ;;
             5)
-                if [ -f "$CUSTOM_NODES" ]; then
-                    echo -e "\n${YELLOW}>>> 当前自定义节点：${RESET}"
-                    nl -w3 -s". " "$CUSTOM_NODES"
-                    echo -n "请输入要删除的节点编号: "
-                    read num
-                    if [[ $num =~ ^[0-9]+$ ]]; then
-                        sed -i "${num}d" "$CUSTOM_NODES"
-                        echo -e "${GREEN}✓ 节点已删除${RESET}"
-                        
-                        # 重新测试并更新
-                        if [ -s "$CUSTOM_NODES" ]; then
-                            test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
-                        else
-                            test_default_nodes "$RPC_FILE"
-                        fi
-                        
-                        # 保存最佳节点
-                        if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
-                            head -n 1 "$RPC_FILE" > "$BEST_RPC"
-                            cp "$BEST_RPC" "$PYTHON_RPC"
-                            
-                            # 显示当前使用的节点
-                            local endpoint provider latency status type
-                            IFS="|" read -r endpoint provider latency status type < "$BEST_RPC"
-                            echo -e "${GREEN}✓ 当前使用: $provider ($endpoint)${RESET}"
-                        fi
-                    else
-                        echo -e "${RED}无效的编号${RESET}"
-                    fi
-                else
-                    echo -e "${RED}>>> 没有自定义节点${RESET}"
-                fi
+                delete_custom_node
                 ;;
             6)
                 return
