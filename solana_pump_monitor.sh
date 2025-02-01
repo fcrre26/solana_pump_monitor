@@ -328,13 +328,28 @@ EOF
 }
 
 # RPC节点管理
+# RPC节点管理
 manage_rpc() {
     ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
     mkdir -p "$HOME/.solana_pump"
     
+    # 检查并安装 Solana CLI
+    if ! command -v solana &> /dev/null; then
+        echo -e "${YELLOW}>>> 正在安装 Solana CLI...${RESET}"
+        sudo curl -sSfL https://release.anza.xyz/v2.0.18/install | sh
+        export PATH="/root/.local/share/solana/install/active_release/bin:$PATH"
+        echo -e "${GREEN}>>> solana-cli 安装成功${RESET}"
+        echo -e "${GREEN}>>> PATH已更新${RESET}"
+        solana config set --url https://api.mainnet-beta.solana.com
+    fi
+    
+    # 检查RPC处理脚本
+    if [ ! -f "$HOME/.solana_pump/process_rpc.py" ]; then
+        generate_rpc_script
+    fi
+    
     # 默认公共RPC节点列表
-    DEFAULT_RPC_NODES='
-# Solana 官方公共RPC节点
+    DEFAULT_RPC_NODES='# Solana 官方公共RPC节点
 api.mainnet-beta.solana.com | 100 | Solana | Official Mainnet
 api.devnet.solana.com | 100 | Solana | Official Devnet
 
@@ -462,17 +477,79 @@ mainnet.rpcpool.com | 100 | Slope | Global'
         echo "7. 返回主菜单"
         echo -n "请选择 [1-7]: "
         read choice
-                case $choice in
+        
+        case $choice in
             1)
                 echo -e "${YELLOW}>>> 请粘贴节点列表 (格式: IP | 延迟 | 供应商 | 位置)${RESET}"
                 echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
                 cat > "$ANALYSIS_FILE"
                 
                 if [ -f "$ANALYSIS_FILE" ]; then
+                    "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
+                else
+                    echo -e "${RED}>>> 节点列表文件不存在${RESET}"
+                fi
+                ;;
+            2)
+                if [ -f "$RPC_FILE" ]; then
+                    echo -e "\n${YELLOW}>>> 当前RPC节点列表：${RESET}"
+                    cat "$RPC_FILE"
+                else
+                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
+                fi
+                ;;
+            3)
+                if [ -f "$RPC_FILE" ]; then
+                    echo -e "${YELLOW}>>> 开始测试节点延迟...${RESET}"
+                    "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE.new"
+                    if [ $? -eq 0 ]; then
+                        mv "$RPC_FILE.new" "$RPC_FILE"
+                    fi
+                else
+                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
+                fi
+                ;;
+            4)
+                if [ -n "$(command -v vim)" ]; then
+                    vim "$ANALYSIS_FILE"
+                else
+                    nano "$ANALYSIS_FILE"
+                fi
+                ;;
+            5)
+                echo -e "${YELLOW}>>> 使用默认公共RPC节点...${RESET}"
+                echo "$DEFAULT_RPC_NODES" > "$ANALYSIS_FILE"
+                "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
+                ;;
+            6)
+                echo -e "${YELLOW}>>> 开始扫描网络节点...${RESET}"
+                if ! command -v solana &> /dev/null; then
+                    echo -e "${RED}错误: 未安装solana-cli${RESET}"
+                    echo "请先安装: https://docs.solana.com/cli/install-solana-cli-tools"
+                    continue
+                fi
+                
+                if ! solana gossip &> /dev/null; then
+                    echo -e "${RED}错误: 未连接到Solana网络${RESET}"
+                    echo "请先运行: solana config set --url mainnet-beta"
+                    continue
+                fi
+                
+                "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE" --scan-network
+                ;;
+            7)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效选项!${RESET}"
+                ;;
+        esac
+    done
+}
 
-# 生成处理脚本
+# 生成RPC处理脚本
 generate_rpc_script() {
-cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
+    cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
 #!/usr/bin/env python3
 import os
 import sys
@@ -614,7 +691,8 @@ def test_nodes_batch(nodes, max_workers=20):
                 node['real_latency'] = 999
                 node['is_working'] = False
                 print(f"\r处理: {i}/{total} | 节点: {node['ip']:50} | 延迟: 999.0ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
-                def process_rpc_list(input_file, output_file, scan_network=False, batch_size=100):
+
+def process_rpc_list(input_file, output_file, scan_network=False, batch_size=100):
     """分批处理RPC节点列表"""
     nodes = []
     batch = []
@@ -749,75 +827,10 @@ if __name__ == '__main__':
         print(f"\n\033[31m错误: {e}\033[0m")
         sys.exit(1)
 EOF
-chmod +x "$HOME/.solana_pump/process_rpc.py"
-echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
-                    
-                    # 运行处理脚本
-                    "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
-                else
-                    echo -e "${RED}>>> 节点列表文件不存在${RESET}"
-                fi
-                ;;
-            2)
-                if [ -f "$RPC_FILE" ]; then
-                    echo -e "\n${YELLOW}>>> 当前RPC节点列表：${RESET}"
-                    cat "$RPC_FILE"
-                else
-                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
-                fi
-                ;;
-            3)
-                if [ -f "$RPC_FILE" ]; then
-                    echo -e "${YELLOW}>>> 开始测试节点延迟...${RESET}"
-                    "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE.new"
-                    if [ $? -eq 0 ]; then
-                        mv "$RPC_FILE.new" "$RPC_FILE"
-                    fi
-                else
-                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
-                fi
-                ;;
-            4)
-                # 编辑节点列表
-                if [ -n "$(command -v vim)" ]; then
-                    vim "$ANALYSIS_FILE"
-                else
-                    nano "$ANALYSIS_FILE"
-                fi
-                ;;
-            5)
-                echo -e "${YELLOW}>>> 使用默认公共RPC节点...${RESET}"
-                echo "$DEFAULT_RPC_NODES" > "$ANALYSIS_FILE"
-                "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
-                ;;
-            6)
-                echo -e "${YELLOW}>>> 开始扫描网络节点...${RESET}"
-                # 确保已安装solana-cli
-                if ! command -v solana &> /dev/null; then
-                    echo -e "${RED}错误: 未安装solana-cli${RESET}"
-                    echo "请先安装: https://docs.solana.com/cli/install-solana-cli-tools"
-                    continue
-                fi
-                
-                # 检查是否已连接到网络
-                if ! solana gossip &> /dev/null; then
-                    echo -e "${RED}错误: 未连接到Solana网络${RESET}"
-                    echo "请先运行: solana config set --url mainnet-beta"
-                    continue
-                fi
-                
-                # 运行扫描脚本
-                "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE" --scan-network
-                ;;
-            7)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选项!${RESET}"
-                ;;
-        esac
-    done
-}     
+
+    chmod +x "$HOME/.solana_pump/process_rpc.py"
+    echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
+}
 
 # 生成Python监控脚本
 generate_python_script() {
