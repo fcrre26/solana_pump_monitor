@@ -357,11 +357,14 @@ EOF
 #===========================================
 # RPC节点管理模块
 #===========================================
+#===========================================
+# RPC节点管理模块
+#===========================================
 
 # 生成RPC处理脚本
 generate_rpc_script() {
     mkdir -p "$HOME/.solana_pump"
-    cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
+    cat > "$HOME/.solana_pump/process_rpc.py" << 'ENDOFPYTHON'
 #!/usr/bin/env python3
 import os
 import sys
@@ -405,14 +408,13 @@ class RPCNode:
 
 def test_node_health(node: RPCNode, timeout: int = 3) -> bool:
     if not node.endpoint:
-        if node.ip.startswith('http'):
+        if node.ip.startswith("http"):
             node.endpoint = node.ip
         else:
-            base_ip = node.ip.split(':')[0]
-            node.endpoint = f"https://{node.ip}" if ':' in node.ip else f"https://{base_ip}:8899"
+            base_ip = node.ip.split(":")[0]
+            node.endpoint = f"https://{node.ip}" if ":" in node.ip else f"https://{base_ip}:8899"
 
     headers = {"Content-Type": "application/json"}
-    
     checks = [
         {"method": "getHealth", "params": []},
         {"method": "getVersion", "params": []},
@@ -485,36 +487,6 @@ def test_nodes_batch(nodes: List[RPCNode], batch_size: int = 10) -> List[RPCNode
     
     return working_nodes
 
-def scan_network_nodes() -> List[RPCNode]:
-    try:
-        import subprocess
-        result = subprocess.run(['solana', 'gossip'], capture_output=True, text=True)
-        
-        nodes = []
-        for line in result.stdout.split('\n'):
-            if '|' in line and 'ip=' in line:
-                try:
-                    parts = line.split('|')
-                    ip_part = [p for p in parts if 'ip=' in p][0]
-                    ip = ip_part.split('=')[1].strip()
-                    
-                    version = "Unknown"
-                    for part in parts:
-                        if 'version=' in part:
-                            version = part.split('=')[1].strip()
-                    
-                    nodes.append(RPCNode(
-                        ip=ip,
-                        provider=f"Validator ({version})",
-                        location="Network Node"
-                    ))
-                except:
-                    continue
-        
-        return nodes
-    except:
-        return []
-
 def process_rpc_list(input_file: str, output_file: str, scan_network: bool = False):
     nodes = []
     processed_ips = set()
@@ -550,29 +522,18 @@ def process_rpc_list(input_file: str, output_file: str, scan_network: bool = Fal
                     print(f"\033[31m处理节点失败: {line} ({str(e)})\033[0m")
                     continue
     
-    if scan_network:
-        network_nodes = scan_network_nodes()
-        for node in network_nodes:
-            if node.ip.split(':')[0] not in processed_ips:
-                nodes.append(node)
-    
-    if not nodes:
-        print("\n\033[31m错误: 没有找到可用的节点\033[0m")
-        return
-    
     working_nodes = test_nodes_batch(nodes)
     working_nodes.sort(key=lambda x: (100 - x.health_score, x.real_latency))
     
     if working_nodes:
-        print(f"\n\033[33m>>> 正在保存 {len(working_nodes)} 个有效节点到 {output_file}\033[0m")
-        with open(output_file, 'w') as f:
-            for node in working_nodes:
-                f.write(json.dumps(node.to_dict()) + '\n')
-        
         print(f"\n\033[32m✓ 处理完成")
         print(f"总节点数: {len(nodes)}")
         print(f"有效节点数: {len(working_nodes)}")
         print(f"可用率: {len(working_nodes)/len(nodes)*100:.1f}%")
+        
+        with open(output_file, 'w') as f:
+            for node in working_nodes:
+                f.write(json.dumps(node.to_dict()) + '\n')
         
         print('\n最佳RPC节点 (前10个):')
         print('=' * 120)
@@ -597,12 +558,11 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"\n\033[31m错误: {e}\033[0m")
         sys.exit(1)
-EOF
+ENDOFPYTHON
 
     chmod +x "$HOME/.solana_pump/process_rpc.py"
     echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
 }
-
 # RPC节点管理主函数
 manage_rpc() {
     ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
@@ -767,6 +727,7 @@ EOF
         esac
     done
 }
+
 
 #===========================================
 # Python监控核心模块
