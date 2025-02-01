@@ -479,7 +479,7 @@ EOF
 
 # 生成RPC处理脚本
 generate_rpc_script() {
-    cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
+    cat > "$HOME/.solana_pump/process_rpc.py" << 'EOFPYTHON'
 #!/usr/bin/env python3
 import os
 import sys
@@ -521,60 +521,6 @@ class RPCNode:
             "health": self.health_score,
             "version": self.version,
             "last_checked": self.last_checked
-        }
-
-class RPCManager:
-    def __init__(self):
-        self.history_file = os.path.expanduser("~/.solana_pump/rpc_history.json")
-        self.node_history = self.load_history()
-    
-    def load_history(self):
-        try:
-            if os.path.exists(self.history_file):
-                with open(self.history_file, 'r') as f:
-                    return json.load(f)
-        except:
-            pass
-        return {}
-    
-    def save_history(self):
-        try:
-            with open(self.history_file, 'w') as f:
-                json.dump(self.node_history, f, indent=4)
-        except:
-            pass
-    
-    def update_node_history(self, node):
-        if node.ip not in self.node_history:
-            self.node_history[node.ip] = {
-                "first_seen": time.time(),
-                "checks": 0,
-                "successes": 0,
-                "total_latency": 0,
-                "min_latency": float('inf'),
-                "max_latency": 0
-            }
-        
-        history = self.node_history[node.ip]
-        history["checks"] += 1
-        if node.is_working:
-            history["successes"] += 1
-            history["total_latency"] += node.real_latency
-            history["min_latency"] = min(history["min_latency"], node.real_latency)
-            history["max_latency"] = max(history["max_latency"], node.real_latency)
-        history["last_check"] = time.time()
-    
-    def get_node_stats(self, node):
-        if node.ip not in self.node_history:
-            return None
-        
-        history = self.node_history[node.ip]
-        return {
-            "uptime": history["successes"] / history["checks"] if history["checks"] > 0 else 0,
-            "avg_latency": history["total_latency"] / history["successes"] if history["successes"] > 0 else 0,
-            "min_latency": history["min_latency"] if history["min_latency"] != float('inf') else 0,
-            "max_latency": history["max_latency"],
-            "age_days": (time.time() - history["first_seen"]) / (24 * 3600)
         }
 
 def test_node_health(node, timeout=3):
@@ -646,7 +592,6 @@ def test_node_health(node, timeout=3):
 
 def test_nodes_batch(nodes, max_workers=20):
     """并行测试节点"""
-    manager = RPCManager()
     working_nodes = []
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -670,21 +615,12 @@ def test_nodes_batch(nodes, max_workers=20):
                     working_count += 1
                     working_nodes.append(tested_node)
                 
-                # 更新节点历史
-                manager.update_node_history(tested_node)
-                
-                # 获取节点统计信息
-                stats = manager.get_node_stats(tested_node)
                 status = '\033[32m可用\033[0m' if tested_node.is_working else '\033[31m不可用\033[0m'
-                
                 print(f"{tested_node.ip:50} | {tested_node.real_latency:6.1f}ms | {tested_node.health_score:6.0f}/100 | {status:8} | {tested_node.provider:15} | {tested_node.location:20}")
                 
             except Exception as e:
                 print(f"\033[31m测试节点失败 {node.ip}: {str(e)}\033[0m")
                 continue
-    
-    # 保存历史记录
-    manager.save_history()
     
     return working_nodes
 
@@ -811,7 +747,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"\n\033[31m错误: {e}\033[0m")
         sys.exit(1)
-EOF
+EOFPYTHON
 
     chmod +x "$HOME/.solana_pump/process_rpc.py"
     echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
