@@ -359,6 +359,20 @@ EOF
 # RPC节点处理模块
 #===========================================
 
+# 状态指示图标
+STATUS_OK="🟢"
+STATUS_SLOW="🟡"
+STATUS_ERROR="🔴"
+
+# 节点类型标识
+NODE_TYPE_OFFICIAL="[官方]"
+NODE_TYPE_PUBLIC="[公共]"
+NODE_TYPE_CUSTOM="[自定义]"
+
+# 延迟阈值(毫秒)
+LATENCY_GOOD=500    # 良好延迟阈值
+LATENCY_WARN=1000   # 警告延迟阈值
+
 # 默认RPC节点列表
 DEFAULT_RPC_NODES=(
     "https://api.mainnet-beta.solana.com|Solana Official"
@@ -381,16 +395,6 @@ DEFAULT_RPC_NODES=(
     "https://solana-mainnet-rpc.allthatnode.com|AllThatNode"
     "https://mainnet.rpcpool.com|RPCPool Mainnet"
     "https://api.solanium.io|Solanium"
-    "https://api.solana.cloud|Solana.cloud"
-    "https://api.solanaapi.com|SolanaAPI"
-    "https://api.solscan.io|Solscan API"
-    "https://api.solanabeach.io/v1|Solana Beach"
-    "https://api.solflare.com|Solflare"
-    "https://api.solanaexplorer.com|Solana Explorer"
-    "https://api.solanarpc.com|SolanaRPC"
-    "https://api.solananode.com|SolanaNode"
-    "https://api.solanaprime.com|SolanaPrime"
-    "https://api.solanaworld.com|SolanaWorld"
 )
 
 # 测试RPC节点延迟和可用性
@@ -417,12 +421,117 @@ test_rpc_node() {
     # 计算延迟(ms)
     local latency=$(echo "($end_time - $start_time) * 1000" | bc)
     
-    # 检查响应
+    # 确定状态图标和节点类型
+    local status
+    local type
+    if [[ "$provider" == *"Official"* ]]; then
+        type="$NODE_TYPE_OFFICIAL"
+    elif [[ "$endpoint" == *"custom"* ]]; then
+        type="$NODE_TYPE_CUSTOM"
+    else
+        type="$NODE_TYPE_PUBLIC"
+    fi
+    
     if [ ! -z "$response" ] && [[ "$response" == *"result"* ]]; then
-        echo "$endpoint|$provider|$latency"
+        if (( $(echo "$latency < $LATENCY_GOOD" | bc -l) )); then
+            status="$STATUS_OK"
+        elif (( $(echo "$latency < $LATENCY_WARN" | bc -l) )); then
+            status="$STATUS_SLOW"
+        else
+            status="$STATUS_ERROR"
+        fi
+        echo "$endpoint|$provider|$latency|$status|$type"
         return 0
     fi
     return 1
+}
+
+# 测试所有节点
+test_all_nodes() {
+    local input_file="$1"
+    local output_file="$2"
+    local total_nodes=0
+    local working_nodes=0
+    local good_nodes=0
+    local slow_nodes=0
+    
+    # 清空输出文件
+    > "$output_file"
+    
+    echo -e "\n${YELLOW}>>> 开始测试节点...${RESET}"
+    
+    # 读取并测试节点
+    while IFS="|" read -r endpoint provider || [ -n "$endpoint" ]; do
+        [ -z "$endpoint" ] && continue
+        ((total_nodes++))
+        echo -ne "\r测试进度: $total_nodes"
+        
+        if result=$(test_rpc_node "$endpoint" "$provider"); then
+            echo "$result" >> "$output_file"
+            ((working_nodes++))
+            
+            # 统计节点状态
+            if [[ "$result" == *"$STATUS_OK"* ]]; then
+                ((good_nodes++))
+            elif [[ "$result" == *"$STATUS_SLOW"* ]]; then
+                ((slow_nodes++))
+            fi
+        fi
+    done < "$input_file"
+    
+    # 按延迟排序
+    if [ -f "$output_file" ]; then
+        sort -t"|" -k3 -n "$output_file" -o "$output_file"
+    fi
+    
+    echo -e "\n\n${GREEN}✓ 测试完成"
+    echo "总节点数: $total_nodes"
+    echo "可用节点数: $working_nodes"
+    echo "良好节点数: $good_nodes"
+    echo "较慢节点数: $slow_nodes"
+    echo -e "可用率: $(( working_nodes * 100 / total_nodes ))%${RESET}"
+    
+    # 显示最佳节点
+    if [ $working_nodes -gt 0 ]; then
+        echo -e "\n最佳节点 (延迟<${LATENCY_GOOD}ms):"
+        echo "------------------------------------------------"
+        head -n 5 "$output_file" | while IFS="|" read -r endpoint provider latency status type; do
+            if (( $(echo "$latency < $LATENCY_GOOD" | bc -l) )); then
+                printf "%-4s %-8s %7.1f  %-15s %s\n" \
+                    "$status" "$type" "$latency" "$provider" "$endpoint"
+            fi
+        done
+    fi
+}
+
+# 测试默认节点
+test_default_nodes() {
+    local output_file="$1"
+    local temp_file="/tmp/default_nodes.txt"
+    
+    # 写入默认节点到临时文件
+    printf "%s\n" "${DEFAULT_RPC_NODES[@]}" > "$temp_file"
+    
+    # 测试节点
+    test_all_nodes "$temp_file" "$output_file"
+    
+    # 清理临时文件
+    rm -f "$temp_file"
+}
+
+# 添加自定义节点
+add_custom_node() {
+    echo -e "${YELLOW}>>> 添加自定义RPC节点${RESET}"
+    echo -n "请输入节点地址: "
+    read endpoint
+    echo -n "请输入节点供应商: "
+    read provider
+    
+    if [ ! -z "$endpoint" ]; then
+        echo "$endpoint|$provider" >> "$CUSTOM_NODES"
+        echo -e "${GREEN}✓ 节点已添加${RESET}"
+        test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
+    fi
 }
 
 # RPC节点管理主函数
@@ -437,23 +546,24 @@ manage_rpc() {
         echo "2. 查看当前节点"
         echo "3. 测试节点延迟"
         echo "4. 使用默认节点"
-        echo "5. 返回主菜单"
-        echo -n "请选择 [1-5]: "
+        echo "5. 删除自定义节点"
+        echo "6. 返回主菜单"
+        echo -n "请选择 [1-6]: "
         read choice
         
         case $choice in
             1)
-                echo -e "${YELLOW}>>> 请输入RPC节点信息 (格式: endpoint|provider)${RESET}"
-                echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
-                cat > "$CUSTOM_NODES"
-                test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
+                add_custom_node
                 ;;
             2)
                 if [ -f "$RPC_FILE" ]; then
                     echo -e "\n${YELLOW}>>> 当前RPC节点列表：${RESET}"
-                    echo -e "节点地址|供应商|延迟(ms)"
-                    echo "----------------------------------------"
-                    cat "$RPC_FILE"
+                    echo -e "状态 类型    延迟(ms)  供应商          节点地址"
+                    echo "------------------------------------------------"
+                    while IFS="|" read -r endpoint provider latency status type; do
+                        printf "%-4s %-8s %7.1f  %-15s %s\n" \
+                            "$status" "$type" "$latency" "$provider" "$endpoint"
+                    done < "$RPC_FILE"
                 else
                     echo -e "${RED}>>> RPC节点列表为空${RESET}"
                 fi
@@ -471,6 +581,23 @@ manage_rpc() {
                 test_default_nodes "$RPC_FILE"
                 ;;
             5)
+                if [ -f "$CUSTOM_NODES" ]; then
+                    echo -e "\n${YELLOW}>>> 当前自定义节点：${RESET}"
+                    nl -w3 -s". " "$CUSTOM_NODES"
+                    echo -n "请输入要删除的节点编号: "
+                    read num
+                    if [[ $num =~ ^[0-9]+$ ]]; then
+                        sed -i "${num}d" "$CUSTOM_NODES"
+                        echo -e "${GREEN}✓ 节点已删除${RESET}"
+                        test_all_nodes "$CUSTOM_NODES" "$RPC_FILE"
+                    else
+                        echo -e "${RED}无效的编号${RESET}"
+                    fi
+                else
+                    echo -e "${RED}>>> 没有自定义节点${RESET}"
+                fi
+                ;;
+            6)
                 return
                 ;;
             *)
@@ -478,56 +605,6 @@ manage_rpc() {
                 ;;
         esac
     done
-}
-
-# 测试所有节点
-test_all_nodes() {
-    local input_file="$1"
-    local output_file="$2"
-    local total_nodes=0
-    local working_nodes=0
-    
-    # 清空输出文件
-    > "$output_file"
-    
-    echo -e "\n${YELLOW}>>> 开始测试节点...${RESET}"
-    
-    # 读取并测试节点
-    while IFS="|" read -r endpoint provider || [ -n "$endpoint" ]; do
-        [ -z "$endpoint" ] && continue
-        ((total_nodes++))
-        echo -ne "\r测试进度: $total_nodes"
-        
-        if result=$(test_rpc_node "$endpoint" "$provider"); then
-            echo "$result" >> "$output_file"
-            ((working_nodes++))
-        fi
-    done < "$input_file"
-    
-    # 按延迟排序
-    if [ -f "$output_file" ]; then
-        sort -t"|" -k3 -n "$output_file" -o "$output_file"
-    fi
-    
-    echo -e "\n\n${GREEN}✓ 测试完成"
-    echo "总节点数: $total_nodes"
-    echo "可用节点数: $working_nodes"
-    echo -e "可用率: $(( working_nodes * 100 / total_nodes ))%${RESET}"
-}
-
-# 测试默认节点
-test_default_nodes() {
-    local output_file="$1"
-    local temp_file="/tmp/default_nodes.txt"
-    
-    # 写入默认节点到临时文件
-    printf "%s\n" "${DEFAULT_RPC_NODES[@]}" > "$temp_file"
-    
-    # 测试节点
-    test_all_nodes "$temp_file" "$output_file"
-    
-    # 清理临时文件
-    rm -f "$temp_file"
 }
 
 #===========================================
