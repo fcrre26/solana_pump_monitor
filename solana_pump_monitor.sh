@@ -608,14 +608,12 @@ manage_rpc() {
 }
 
 #===========================================
-#===========================================
 # Python监控核心模块
 #===========================================
 generate_python_script() {
     echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
     mkdir -p "$(dirname "$PY_SCRIPT")"
     
-    # 注意: 这里的EOFPYTHON必须顶格写，不能有缩进
 cat > "$PY_SCRIPT" << 'EOFPYTHON'
 #!/usr/bin/env python3
 import os
