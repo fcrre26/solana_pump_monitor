@@ -480,6 +480,7 @@ EOF
 generate_rpc_script() {
     mkdir -p "$HOME/.solana_pump"
     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOFPYTHON'
+#!/usr/bin/env python3
 import os
 import sys
 import json
@@ -725,8 +726,6 @@ EOFPYTHON
     chmod +x "$HOME/.solana_pump/process_rpc.py"
     echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
 }
-
-
 
 #===========================================
 # Python监控核心模块
