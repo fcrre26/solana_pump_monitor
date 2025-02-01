@@ -704,349 +704,273 @@ manage_rpc() {
 #===========================================
 # Python监控核心模块
 #===========================================
+#===========================================
+# Python监控核心模块
+#===========================================
 generate_python_script() {
     echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
     mkdir -p "$(dirname "$PY_SCRIPT")"
     
-cat > "$PY_SCRIPT" << 'EOFPYTHON'
+cat > "$PY_SCRIPT" << 'EOF'
 #!/usr/bin/env python3
 import os
-import sys
 import time
 import json
 import logging
-import asyncio
-import aiohttp
-import urllib3
+import requests
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor
-from cachetools import TTLCache
-from tenacity import retry, stop_after_attempt, wait_exponential
 from wcferry import Wcf
-
-# 禁用SSL警告
-urllib3.disable_warnings()
-
-# 设置UTC+8时区
-TZ = timezone(timedelta(hours=8))
+from concurrent.futures import ThreadPoolExecutor
 
 class TokenMonitor:
     def __init__(self):
-        # 基础配置
         self.config_file = os.path.expanduser("~/.solana_pump.cfg")
         self.rpc_file = os.path.expanduser("~/.solana_pump.rpc")
-        self.watch_file = os.path.expanduser("~/.solana_pump/watch_addresses.json")
+        self.watch_dir = os.path.expanduser("~/.solana_pump")
+        self.watch_file = os.path.join(self.watch_dir, "watch_addresses.json")
+        self.watch_addresses = {}
+        self.address_cache = {}
+        self.wcf = None
         
         # 加载配置
-        self.config = self.load_config()
-        self.api_keys = self.config.get('api_keys', [])
-        self.current_key = 0
-        
-        # API请求计数器
-        self.request_counts = {}
-        self.last_reset = {}
-        
-        # 初始化缓存
-        self.token_cache = TTLCache(maxsize=1000, ttl=3600)  # 1小时过期
-        self.creator_cache = TTLCache(maxsize=500, ttl=1800)  # 30分钟过期
-        self.block_cache = TTLCache(maxsize=100, ttl=300)    # 5分钟过期
-        
-        # RPC节点管理
-        self.rpc_nodes = []
-        self.current_rpc = None
-        self.last_rpc_check = 0
-        self.rpc_check_interval = 300  # 5分钟检查一次
-        
-        # 监控统计
-        self.stats = {
-            'start_time': time.time(),
-            'processed_blocks': 0,
-            'found_tokens': 0,
-            'api_calls': 0,
-            'errors': 0,
-            'last_slot': 0
-        }
-        
-        # 初始化通知系统
-        self.wcf = None
-        self.watch_addresses = self.load_watch_addresses()
-        self.init_wcf()
-        
-        # 初始化API密钥
-        for key in self.api_keys:
-            if key.strip():
-                self.request_counts[key] = 0
-                self.last_reset[key] = time.time()
-
-    def load_config(self):
-        """加载配置文件"""
         try:
             with open(self.config_file) as f:
-                return json.load(f)
+                self.config = json.load(f)
         except Exception as e:
             logging.error(f"加载配置失败: {e}")
-            return {"api_keys": [], "serverchan": {"keys": []}, "wcf": {"groups": []}}
-
-    def load_watch_addresses(self):
-        """加载监控地址"""
+            self.config = {"api_keys": [], "serverchan": {"keys": []}, "wcf": {"groups": []}}
+        
+        # 加载关注地址
         try:
-            with open(self.watch_file) as f:
-                data = json.load(f)
-                return {addr['address']: addr['note'] for addr in data.get('addresses', [])}
+            if os.path.exists(self.watch_file):
+                with open(self.watch_file) as f:
+                    data = json.load(f)
+                    self.watch_addresses = {addr["address"]: addr["note"] 
+                                         for addr in data.get("addresses", [])}
         except Exception as e:
             logging.error(f"加载关注地址失败: {e}")
-            return {}
-
-    def init_wcf(self):
-        """初始化微信通知"""
-        if self.config['wcf']['groups']:
+        
+        # 初始化WeChatFerry
+        if self.config["wcf"]["groups"]:
             try:
                 self.wcf = Wcf()
-                logging.info("WeChatFerry初始化成功")
             except Exception as e:
-                logging.error(f"WeChatFerry初始化失败: {e}")
-                self.wcf = None
+                logging.error(f"初始化WeChatFerry失败: {e}")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def get_next_api_key(self):
-        """获取下一个可用的API密钥(带重试)"""
-        now = time.time()
-        for key in self.api_keys:
-            if not key.strip():
-                continue
-                
-            if now - self.last_reset[key] >= 60:
-                self.request_counts[key] = 0
-                self.last_reset[key] = now
-            
-            if self.request_counts[key] < 100:
-                self.request_counts[key] += 1
-                return key
-        
-        await asyncio.sleep(1)  # 如果所有密钥都达到限制，等待1秒
-        raise Exception("所有API密钥已达到限制")
-
-    async def get_best_rpc(self):
+    def get_best_rpc(self):
         """获取最佳RPC节点"""
+        DEFAULT_RPC = [
+            "https://api.mainnet-beta.solana.com",
+            "https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff",
+            "https://api.devnet.solana.com",
+            "https://solana-api.projectserum.com",
+            "https://rpc.ankr.com/solana"
+        ]
+        
         try:
-            # 定期检查RPC节点状态
-            if time.time() - self.last_rpc_check > self.rpc_check_interval:
-                await self.check_rpc_nodes()
-            
-            if self.current_rpc:
-                return self.current_rpc
-                
-            with open(self.rpc_file) as f:
-                nodes = [line.strip().split('|') for line in f]
-                if not nodes:
-                    raise Exception("没有可用的RPC节点")
-                self.current_rpc = nodes[0][0]
-                return self.current_rpc
+            if os.path.exists(self.rpc_file):
+                with open(self.rpc_file) as f:
+                    nodes = [line.strip().split('|')[0] for line in f if line.strip()]
+                    if nodes:
+                        return nodes[0]
         except Exception as e:
-            logging.error(f"获取RPC节点失败: {e}")
-            return "https://api.mainnet-beta.solana.com"
+            logging.warning(f"读取RPC配置失败: {e}")
+        
+        current_rpc = DEFAULT_RPC[0]
+        logging.info(f"使用默认RPC节点: {current_rpc}")
+        return current_rpc
 
-    async def check_rpc_nodes(self):
-        """检查RPC节点状态"""
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            with open(self.rpc_file) as f:
-                nodes = [line.strip().split('|') for line in f]
-                for node in nodes:
-                    tasks.append(self.check_rpc_node(session, node[0]))
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            valid_nodes = [node for node, result in zip(nodes, results) if result]
-            
-            if valid_nodes:
-                self.current_rpc = valid_nodes[0][0]
-                self.last_rpc_check = time.time()
-            else:
-                logging.error("没有可用的RPC节点")
+    def get_next_api_key(self):
+        """轮询获取下一个API密钥"""
+        if not hasattr(self, '_current_key_index'):
+            self._current_key_index = 0
+        elif not self.config["api_keys"]:
+            return None
+        
+        key = self.config["api_keys"][self._current_key_index]
+        self._current_key_index = (self._current_key_index + 1) % len(self.config["api_keys"])
+        return key
 
-    async def check_rpc_node(self, session, endpoint):
-        """检查单个RPC节点"""
+    def fetch_token_info(self, mint):
+        """获取代币信息"""
         try:
-            async with session.post(
-                endpoint,
-                json={"jsonrpc":"2.0","id":1,"method":"getHealth"},
-                timeout=5
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return "result" in data
-        except:
-            return False
-        return False
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def fetch_token_info(self, session, mint):
-        """获取代币详细信息(带重试)"""
-        # 检查缓存
-        if mint in self.token_cache:
-            return self.token_cache[mint]
+            headers = {"X-API-KEY": self.get_next_api_key()}
+            url = f"https://public-api.birdeye.so/public/token_metadata?address={mint}"
+            resp = requests.get(url, headers=headers, timeout=5)
             
-        try:
-            api_key = await self.get_next_api_key()
-            headers = {"X-API-KEY": api_key}
-            
-            # 获取基本信息
-            async with session.get(
-                f"https://public-api.birdeye.so/public/token_metadata?address={mint}",
-                headers=headers,
-                timeout=5
-            ) as resp:
-                data = await resp.json()
-                
+            if resp.status_code == 200:
+                data = resp.json()
                 if data.get("success"):
-                    token_data = data["data"]
-                    
-                    # 获取持有人信息
-                    async with session.get(
-                        f"https://public-api.birdeye.so/public/token_holders?address={mint}",
-                        headers=headers,
-                        timeout=5
-                    ) as holders_resp:
-                        holders_data = (await holders_resp.json()).get("data", [])
-                    
-                    # 计算持有人集中度
-                    total_supply = float(token_data.get("supply", 0))
-                    holder_concentration = 0
-                    if holders_data and total_supply > 0:
-                        top_10_holdings = sum(float(h.get("amount", 0)) for h in holders_data[:10])
-                        holder_concentration = (top_10_holdings / total_supply) * 100
-                    
-                    token_info = {
-                        "name": token_data.get("name", "Unknown"),
-                        "symbol": token_data.get("symbol", ""),
-                        "supply": total_supply,
-                        "price": float(token_data.get("price", 0)),
-                        "market_cap": float(token_data.get("mc", 0)),
-                        "liquidity": float(token_data.get("liquidity", 0)),
-                        "holder_count": len(holders_data),
-                        "holder_concentration": holder_concentration
+                    token = data["data"]
+                    return {
+                        "supply": float(token.get("supply", 0)),
+                        "price": float(token.get("price", 0)),
+                        "market_cap": float(token.get("marketCap", 0)),
+                        "liquidity": float(token.get("liquidity", 0)),
+                        "holder_count": int(token.get("holderCount", 0)),
+                        "holder_concentration": float(token.get("holderConcentration", 0))
                     }
-                    
-                    # 缓存结果
-                    self.token_cache[mint] = token_info
-                    return token_info
-                    
         except Exception as e:
             logging.error(f"获取代币信息失败: {e}")
-            return {
-                "name": "Unknown",
-                "symbol": "",
-                "supply": 0,
-                "price": 0,
-                "market_cap": 0,
-                "liquidity": 0,
-                "holder_count": 0,
-                "holder_concentration": 0
-            }
+        
+        return {
+            "supply": 0,
+            "price": 0,
+            "market_cap": 0,
+            "liquidity": 0,
+            "holder_count": 0,
+            "holder_concentration": 0
+        }
 
-    async def analyze_creator_history(self, session, creator):
-        """分析创建者历史"""
+    def analyze_creator_history(self, creator):
+        """分析创建者历史记录"""
         # 检查缓存
-        if creator in self.creator_cache:
-            return self.creator_cache[creator]
-            
+        if creator in self.address_cache:
+            cache = self.address_cache[creator]
+            if time.time() - cache['timestamp'] < 3600:  # 1小时缓存
+                return cache['history']
+        
         try:
-            api_key = await self.get_next_api_key()
-            headers = {"X-API-KEY": api_key}
+            headers = {"X-API-KEY": self.get_next_api_key()}
+            url = f"https://public-api.birdeye.so/public/address_nft?address={creator}"
+            resp = requests.get(url, headers=headers, timeout=5)
             
-            async with session.get(
-                f"https://public-api.solscan.io/account/tokens?account={creator}",
-                headers=headers,
-                timeout=5
-            ) as resp:
-                tokens = await resp.json()
-                
             history = []
-            for token in tokens:
-                mint = token.get("mint")
-                if not mint:
-                    continue
-                    
-                # 获取代币详情
-                token_info = await self.fetch_token_info(session, mint)
+            if resp.status_code == 200:
+                data = resp.json()
+                if not data.get("success"):
+                    return []
                 
-                history.append({
-                    "mint": mint,
-                    "timestamp": token.get("timestamp", 0),
-                    "max_market_cap": token_info.get("market_cap", 0),
-                    "current_market_cap": token_info.get("market_cap", 0),
-                    "status": "活跃" if token_info.get("market_cap", 0) > 0 else "已死"
-                })
-            
-            # 缓存结果
-            self.creator_cache[creator] = history
-            return history
-            
-        except Exception as e:
-            logging.error(f"分析创建者历史失败: {e}")
-            return []
+                for tx in data["data"]:
+                    token_info = self.fetch_token_info(tx["mint"])
+                    max_market_cap = 0
+                    
+                    try:
+                        history_url = f"https://public-api.birdeye.so/public/token_price_history?address={tx['mint']}"
+                        history_resp = requests.get(history_url, headers=headers, timeout=5)
+                        if history_resp.status_code == 200:
+                            price_history = history_resp.json().get("data", [])
+                            if price_history:
+                                max_price = max(float(p.get("value", 0)) for p in price_history)
+                                max_market_cap = max_price * token_info["supply"]
+                    except:
+                        pass
 
-    async def analyze_creator_relations(self, session, creator):
-        """分析创建者关联性"""
+                    history.append({
+                        "mint": tx["mint"],
+                        "timestamp": tx["timestamp"],
+                        "current_market_cap": token_info["market_cap"],
+                        "max_market_cap": max_market_cap,
+                        "liquidity": token_info["liquidity"],
+                        "holder_count": token_info["holder_count"],
+                        "holder_concentration": token_info["holder_concentration"],
+                        "status": "活跃" if token_info["market_cap"] > 0 else "已退出"
+                    })
+
+                # 缓存结果
+                self.address_cache[creator] = {
+                    'timestamp': time.time(),
+                    'history': history
+                }
+                return history
+        except Exception as e:
+            logging.error(f"获取创建者历史失败: {e}")
+        
+        return []
+
+    def analyze_creator_relations(self, creator):
+        """分析创建者地址关联性"""
         try:
-            # 获取钱包年龄
-            async with session.get(
-                f"https://public-api.solscan.io/account/{creator}",
-                timeout=5
-            ) as resp:
-                account_data = await resp.json()
-                first_tx_time = account_data.get("firstTime", time.time())
-                wallet_age = (time.time() - first_tx_time) / 86400  # 转换为天数
-            
-            # 获取关联地址
-            async with session.get(
-                f"https://public-api.solscan.io/account/transactions?account={creator}&limit=50",
-                timeout=5
-            ) as resp:
-                txs = await resp.json()
-            
             related_addresses = set()
             relations = []
             watch_hits = []
             high_value_relations = []
             
-            # 分析交易
-            for tx in txs:
-                for account in tx.get("accounts", []):
-                    if account != creator:
-                        related_addresses.add(account)
-                        
-                        # 检查是否是关注地址
-                        if account in self.watch_addresses:
+            # 1. 分析转账历史
+            headers = {"X-API-KEY": self.get_next_api_key()}
+            url = f"https://public-api.birdeye.so/public/address_activity?address={creator}"
+            resp = requests.get(url, headers=headers, timeout=5)
+            data = resp.json()
+            
+            if data.get("success"):
+                # 记录地址首次交易时间
+                first_tx_time = float('inf')
+                for tx in data["data"]:
+                    first_tx_time = min(first_tx_time, tx.get("timestamp", float('inf')))
+                    
+                    # 记录所有交互过的地址
+                    if tx.get("from") and tx["from"] != creator:
+                        related_addresses.add(tx["from"])
+                        if tx["from"] in self.watch_addresses:
                             watch_hits.append({
-                                "address": account,
-                                "note": self.watch_addresses[account],
-                                "type": "transaction",
-                                "amount": float(tx.get("lamport", 0)) / 1e9,  # 转换为SOL
-                                "timestamp": tx.get("blockTime", 0)
+                                'address': tx["from"],
+                                'note': self.watch_addresses[tx["from"]],
+                                'type': 'transfer_from',
+                                'amount': tx.get("amount", 0),
+                                'timestamp': tx["timestamp"]
                             })
+                            
+                    if tx.get("to") and tx["to"] != creator:
+                        related_addresses.add(tx["to"])
+                        if tx["to"] in self.watch_addresses:
+                            watch_hits.append({
+                                'address': tx["to"],
+                                'note': self.watch_addresses[tx["to"]],
+                                'type': 'transfer_to',
+                                'amount': tx.get("amount", 0),
+                                'timestamp': tx["timestamp"]
+                            })
+                        
+                    # 特别关注大额转账
+                    if tx.get("amount", 0) > 1:  # 1 SOL以上的转账
+                        relations.append({
+                            "address": tx["to"] if tx["from"] == creator else tx["from"],
+                            "type": "transfer",
+                            "amount": tx["amount"],
+                            "timestamp": tx["timestamp"]
+                        })
+                
+                # 计算钱包年龄（天）
+                wallet_age = (time.time() - first_tx_time) / (24 * 3600) if first_tx_time != float('inf') else 0
             
-            # 并行分析关联地址
-            tasks = []
+            # 2. 深度分析关联地址
             for address in related_addresses:
-                tasks.append(self.analyze_creator_history(session, address))
-            
-            results = await asyncio.gather(*tasks)
-            
-            # 处理结果
-            for address, history in zip(related_addresses, results):
-                if history:
-                    high_value_tokens = [
-                        token for token in history 
-                        if token["max_market_cap"] > 100000  # 10万美元以上视为高价值
-                    ]
+                # 分析代币创建历史
+                token_history = self.analyze_creator_history(address)
+                if token_history:
+                    # 找出高价值代币（最高市值超过1亿美元）
+                    high_value_tokens = [t for t in token_history 
+                                       if t["max_market_cap"] > 100_000_000]
                     
                     if high_value_tokens:
                         high_value_relations.append({
                             "address": address,
-                            "total_created": len(history),
-                            "tokens": high_value_tokens
+                            "tokens": high_value_tokens,
+                            "total_created": len(token_history)
                         })
+                    
+                    relations.append({
+                        "address": address,
+                        "type": "token_creator",
+                        "tokens": len(token_history),
+                        "success_rate": sum(1 for t in token_history if t["status"] == "活跃") / len(token_history),
+                        "high_value_tokens": len(high_value_tokens)
+                    })
+            
+            # 3. 分析共同签名者
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = []
+                for address in related_addresses:
+                    futures.append(executor.submit(self._analyze_cosigners, 
+                                                address, creator))
+                
+                for future in futures:
+                    try:
+                        result = future.result()
+                        if result:
+                            relations.extend(result)
+                    except:
+                        continue
             
             return {
                 "wallet_age": wallet_age,
@@ -1068,6 +992,26 @@ class TokenMonitor:
                 "high_value_relations": [],
                 "risk_score": 0
             }
+
+    def _analyze_cosigners(self, address, creator):
+        """分析共同签名者（辅助函数）"""
+        try:
+            tx_url = f"https://public-api.solscan.io/account/transactions?account={address}"
+            tx_resp = requests.get(tx_url, timeout=5)
+            tx_data = tx_resp.json()
+            
+            cosigner_relations = []
+            for tx in tx_data[:100]:  # 只看最近100笔交易
+                if creator in tx.get("signatures", []):
+                    cosigner_relations.append({
+                        "address": address,
+                        "type": "co_signer",
+                        "tx_hash": tx["signature"],
+                        "timestamp": tx["blockTime"]
+                    })
+            return cosigner_relations
+        except:
+            return []
 
     def calculate_risk_score(self, relations, wallet_age):
         """计算风险分数"""
@@ -1174,7 +1118,7 @@ class TokenMonitor:
   - 创建代币总数: {relation['total_created']}
   - 高价值代币数: {len(relation['tokens'])}"""
                 for token in relation['tokens'][:2]:  # 每个地址只显示前2个高价值代币
-                    creation_time = datetime.fromtimestamp(token["timestamp"], tz=TZ)
+                    creation_time = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
                     msg += f"""
   - {token['mint']}
     创建时间: {creation_time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1185,7 +1129,7 @@ class TokenMonitor:
         if relations['watch_hits']:
             msg += "\n\n⚠️ 发现关联的关注地址:"
             for hit in relations['watch_hits']:
-                timestamp = datetime.fromtimestamp(hit["timestamp"], tz=TZ)
+                timestamp = datetime.fromtimestamp(hit["timestamp"], tz=timezone(timedelta(hours=8)))
                 msg += f"""
 • {hit['address']}
   - 备注: {hit['note']}
@@ -1206,7 +1150,7 @@ class TokenMonitor:
 
 最近代币记录:"""
             for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:3]:
-                timestamp = datetime.fromtimestamp(token["timestamp"], tz=TZ)
+                timestamp = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
                 msg += f"""
 • {token['mint']}
   - 创建时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1233,23 +1177,20 @@ class TokenMonitor:
 • Solscan: https://solscan.io/token/{mint}
 • 创建者: https://solscan.io/account/{creator}
 
-⏰ 发现时间: {datetime.now(tz=TZ).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)
+⏰ 发现时间: {datetime.now(tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)
 """
         return msg
 
-    async def send_notification(self, msg):
+    def send_notification(self, msg):
         """发送通知"""
         # Server酱推送
         for key in self.config["serverchan"]["keys"]:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"https://sctapi.ftqq.com/{key}.send",
-                        data={"title": "Solana新代币提醒", "desp": msg},
-                        timeout=5
-                    ) as resp:
-                        if resp.status != 200:
-                            logging.error(f"Server酱推送失败 ({key[:8]}...{key[-8:]})")
+                requests.post(
+                    f"https://sctapi.ftqq.com/{key}.send",
+                    data={"title": "Solana新代币提醒", "desp": msg},
+                    timeout=5
+                )
             except Exception as e:
                 logging.error(f"Server酱推送失败 ({key[:8]}...{key[-8:]}): {e}")
         
@@ -1261,92 +1202,70 @@ class TokenMonitor:
                 except Exception as e:
                     logging.error(f"WeChatFerry推送失败 ({group['name']}): {e}")
 
-    async def monitor(self):
+    def monitor(self):
         """主监控函数"""
         logging.info("监控启动...")
-        self.stats['last_slot'] = 0
+        last_slot = 0
         PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDfgCcMKJ"
         
-        async with aiohttp.ClientSession() as session:
-            while True:
-                try:
-                    rpc = await self.get_best_rpc()
-                    async with session.post(
-                        rpc,
-                        json={"jsonrpc":"2.0","id":1,"method":"getSlot"},
-                        timeout=3
-                    ) as resp:
-                        current_slot = (await resp.json())["result"]
-                    
-                    if self.stats['last_slot'] == 0:
-                        self.stats['last_slot'] = current_slot - 10
-                    
-                    tasks = []
-                    for slot in range(self.stats['last_slot'] + 1, current_slot + 1):
-                        tasks.append(self.process_block(session, slot, PUMP_PROGRAM))
-                    
-                    await asyncio.gather(*tasks)
-                    self.stats['last_slot'] = current_slot
-                    
-                    await asyncio.sleep(1)
-                    
-                except Exception as e:
-                    logging.error(f"监控循环错误: {e}")
-                    await asyncio.sleep(10)
-
-    async def process_block(self, session, slot, program_id):
-        """处理单个区块"""
-        try:
-            rpc = await self.get_best_rpc()
-            async with session.post(
-                rpc,
-                json={
-                    "jsonrpc":"2.0",
-                    "id":1,
-                    "method":"getBlock",
-                    "params":[slot, {"encoding":"json","transactionDetails":"full"}]
-                },
-                timeout=5
-            ) as resp:
-                block = (await resp.json()).get("result")
+        while True:
+            try:
+                rpc = self.get_best_rpc()
+                current_slot = requests.post(
+                    rpc,
+                    json={"jsonrpc":"2.0","id":1,"method":"getSlot"},
+                    timeout=3
+                ).json()["result"]
                 
-                if block and "transactions" in block:
-                    for tx in block["transactions"]:
-                        if program_id in tx["transaction"]["message"]["accountKeys"]:
-                            accounts = tx["transaction"]["message"]["accountKeys"]
-                            creator = accounts[0]
-                            mint = accounts[4]
-                            
-                            # 并行获取所需信息
-                            token_info, history, relations = await asyncio.gather(
-                                self.fetch_token_info(session, mint),
-                                self.analyze_creator_history(session, creator),
-                                self.analyze_creator_relations(session, creator)
-                            )
-                            
-                            alert_data = {
-                                "creator": creator,
-                                "mint": mint,
-                                "token_info": token_info,
-                                "history": history,
-                                "relations": relations
-                            }
-                            
-                            alert_msg = self.format_alert_message(alert_data)
-                            logging.info("\n" + alert_msg)
-                            await self.send_notification(alert_msg)
-                            
-                            # 更新统计信息
-                            self.stats['found_tokens'] += 1
-                            
-                    self.stats['processed_blocks'] += 1
+                if last_slot == 0:
+                    last_slot = current_slot - 10
+                
+                for slot in range(last_slot + 1, current_slot + 1):
+                    try:
+                        block = requests.post(rpc, json={
+                            "jsonrpc":"2.0",
+                            "id":1,
+                            "method":"getBlock",
+                            "params":[slot, {"encoding":"json","transactionDetails":"full"}]
+                        }, timeout=5).json().get("result")
+                        
+                        if block and "transactions" in block:
+                            for tx in block["transactions"]:
+                                if PUMP_PROGRAM in tx["transaction"]["message"]["accountKeys"]:
+                                    accounts = tx["transaction"]["message"]["accountKeys"]
+                                    creator = accounts[0]
+                                    mint = accounts[4]
+                                    
+                                    token_info = self.fetch_token_info(mint)
+                                    history = self.analyze_creator_history(creator)
+                                    relations = self.analyze_creator_relations(creator)
+                                    
+                                    alert_data = {
+                                        "creator": creator,
+                                        "mint": mint,
+                                        "token_info": token_info,
+                                        "history": history,
+                                        "relations": relations
+                                    }
+                                    
+                                    alert_msg = self.format_alert_message(alert_data)
+                                    logging.info("\n" + alert_msg)
+                                    self.send_notification(alert_msg)
                     
-        except Exception as e:
-            logging.error(f"处理区块 {slot} 失败: {e}")
-            self.stats['errors'] += 1
+                    except Exception as e:
+                        logging.error(f"处理区块 {slot} 失败: {e}")
+                        continue
+                    
+                    last_slot = slot
+                    time.sleep(0.1)
+                
+                time.sleep(1)
+            
+            except Exception as e:
+                logging.error(f"监控循环错误: {e}")
+                time.sleep(10)
 
 if __name__ == "__main__":
-    # 设置日志
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -1355,11 +1274,9 @@ if __name__ == "__main__":
             logging.StreamHandler()
         ]
     )
-    
-    # 启动监控
     monitor = TokenMonitor()
-    asyncio.run(monitor.monitor())
-EOFPYTHON
+    monitor.monitor()
+EOF
 
     chmod +x "$PY_SCRIPT"
     echo -e "${GREEN}✓ 监控脚本已生成${RESET}"
