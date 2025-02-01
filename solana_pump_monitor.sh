@@ -22,6 +22,18 @@ RESET='\033[0m'
 #===========================================
 # 配置管理模块
 #===========================================
+# 环境状态文件
+ENV_STATE_FILE="$HOME/.solana_pump/env_state"
+
+# 检查环境状态
+check_env_state() {
+    if [ -f "$ENV_STATE_FILE" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# API密钥配置
 init_config() {
     echo -e "${YELLOW}>>> 配置API密钥 (支持多个，每行一个)${RESET}"
     echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
@@ -52,24 +64,88 @@ init_config() {
 
 # 依赖安装
 install_dependencies() {
-    echo -e "${YELLOW}>>> 检查系统依赖...${RESET}"
-    
-    if command -v apt &>/dev/null; then
-        PKG_MGR="apt"
-        sudo apt update
-    elif command -v yum &>/dev/null; then
-        PKG_MGR="yum"
-    else
-        echo -e "${RED}✗ 不支持的系统!${RESET}"
-        exit 1
+    # 如果环境状态文件存在，直接返回
+    if check_env_state; then
+        return 0
     fi
 
-    sudo $PKG_MGR install -y python3 python3-pip jq
-    pip3 install requests wcferry
+    echo -e "\n${YELLOW}>>> 首次运行需要检查环境${RESET}"
+    echo -e "1. 检查并安装依赖"
+    echo -e "2. 跳过检查（如果确定环境已准备好）"
+    echo -n "请选择 [1-2]: "
+    read choice
 
-    echo -e "${GREEN}✓ 依赖安装完成${RESET}"
+    case $choice in
+        1)
+            echo -e "${YELLOW}>>> 开始安装依赖...${RESET}"
+            if command -v apt &>/dev/null; then
+                PKG_MGR="apt"
+                sudo apt update
+            elif command -v yum &>/dev/null; then
+                PKG_MGR="yum"
+            else
+                echo -e "${RED}✗ 不支持的系统!${RESET}"
+                exit 1
+            fi
+
+            sudo $PKG_MGR install -y python3 python3-pip jq bc curl
+            pip3 install requests wcferry
+
+            # 创建环境状态文件
+            mkdir -p "$(dirname "$ENV_STATE_FILE")"
+            touch "$ENV_STATE_FILE"
+            
+            echo -e "${GREEN}✓ 依赖安装完成${RESET}"
+            ;;
+        2)
+            echo -e "${YELLOW}>>> 跳过环境检查${RESET}"
+            # 创建环境状态文件
+            mkdir -p "$(dirname "$ENV_STATE_FILE")"
+            touch "$ENV_STATE_FILE"
+            ;;
+        *)
+            echo -e "${RED}无效选项!${RESET}"
+            exit 1
+            ;;
+    esac
 }
 
+# 环境管理
+manage_environment() {
+    while true; do
+        echo -e "\n${YELLOW}>>> 环境管理${RESET}"
+        echo "1. 检查环境状态"
+        echo "2. 重新安装依赖"
+        echo "3. 清除环境状态"
+        echo "4. 返回主菜单"
+        echo -n "请选择 [1-4]: "
+        read choice
+
+        case $choice in
+            1)
+                if check_env_state; then
+                    echo -e "${GREEN}✓ 环境已配置${RESET}"
+                else
+                    echo -e "${YELLOW}环境未配置${RESET}"
+                fi
+                ;;
+            2)
+                rm -f "$ENV_STATE_FILE"
+                install_dependencies
+                ;;
+            3)
+                rm -f "$ENV_STATE_FILE"
+                echo -e "${GREEN}✓ 环境状态已清除${RESET}"
+                ;;
+            4)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效选项!${RESET}"
+                ;;
+        esac
+    done
+}
 #===========================================
 # 通知系统模块
 #===========================================
@@ -1974,9 +2050,11 @@ show_menu() {
     echo "4. RPC节点管理"
     echo "5. 通知设置"
     echo "6. 关注地址管理"
-    echo "7. 退出"
-    echo -n "请选择 [1-7]: "
+    echo "7. 环境管理"    # 新增选项
+    echo "8. 退出"
+    echo -n "请选择 [1-8]: "
 }
+
 
 # 主程序入口
 case $1 in
@@ -1993,23 +2071,21 @@ case $1 in
         while true; do
             show_menu
             read choice
-            case $choice in
-                1) start_monitor ;;
-                2) init_config ;;
-                3) toggle_foreground ;;
-                4) manage_rpc ;;
-                5) setup_notification ;;
-                6) manage_watch_addresses ;;
-                7) 
-                    if [ -f "$PIDFILE" ]; then
-                        pid=$(cat "$PIDFILE")
-                        kill "$pid" 2>/dev/null
-                        rm "$PIDFILE"
-                    fi
-                    exit 0 
-                    ;;
-                *) echo -e "${RED}无效选项!${RESET}" ;;
-            esac
-        done
+case $choice in
+    1) start_monitor ;;
+    2) init_config ;;
+    3) toggle_foreground ;;
+    4) manage_rpc ;;
+    5) setup_notification ;;
+    6) manage_watch_addresses ;;
+    7) manage_environment ;;  # 新增选项处理
+    8) 
+        if [ -f "$PIDFILE" ]; then
+            pid=$(cat "$PIDFILE")
+            kill "$pid" 2>/dev/null
+            rm "$PIDFILE"
+        fi
+        exit 0 
         ;;
+    *) echo -e "${RED}无效选项!${RESET}" ;;
 esac
