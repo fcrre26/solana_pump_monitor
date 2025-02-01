@@ -480,7 +480,6 @@ EOF
 generate_rpc_script() {
     mkdir -p "$HOME/.solana_pump"
     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOFPYTHON'
-#!/usr/bin/env python3
 import os
 import sys
 import json
@@ -737,7 +736,6 @@ generate_python_script() {
     echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
     mkdir -p "$(dirname "$PY_SCRIPT")"
     cat > "$PY_SCRIPT" << 'EOFPYTHON'
-#!/usr/bin/env python3
 import os
 import sys
 import time
