@@ -375,48 +375,69 @@ TZ = timezone(timedelta(hours=8))
 
 def test_node_latency(node, timeout=3, retries=2):
     """
-    测试RPC节点延迟
-    - timeout: 请求超时时间
-    - retries: 重试次数
-    返回最小延迟
+    测试RPC节点延迟和可用性
+    返回 (延迟, 是否可用)
     """
     endpoint = f"https://{node['ip'].strip()}:8899"
     headers = {
         "Content-Type": "application/json"
     }
-    data = {
+    
+    # 测试getSlot，验证节点是否正常工作
+    slot_data = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSlot",
+    }
+    
+    # 测试getHealth，获取延迟
+    health_data = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getHealth",
     }
     
     latencies = []
+    is_working = False
+    
     for _ in range(retries):
         try:
-            start_time = time.time()
+            # 先测试getSlot
             response = requests.post(
                 endpoint, 
                 headers=headers,
-                json=data,
+                json=slot_data,
                 timeout=timeout,
-                verify=False  # 忽略SSL证书验证
+                verify=False
             )
-            end_time = time.time()
             
             if response.status_code == 200:
-                latency = (end_time - start_time) * 1000  # 转换为毫秒
-                latencies.append(latency)
+                slot_result = response.json()
+                if 'result' in slot_result:  # 确认能获取到slot
+                    is_working = True
+                    
+                    # 然后测试延迟
+                    start_time = time.time()
+                    response = requests.post(
+                        endpoint, 
+                        headers=headers,
+                        json=health_data,
+                        timeout=timeout,
+                        verify=False
+                    )
+                    end_time = time.time()
+                    
+                    if response.status_code == 200:
+                        latency = (end_time - start_time) * 1000
+                        latencies.append(latency)
+                        
         except Exception as e:
             continue
             
-    return min(latencies) if latencies else 999
+    return (min(latencies) if latencies else 999, is_working)
 
 def test_nodes_batch(nodes, max_workers=20):
-    """
-    并行测试一批节点
-    - nodes: 节点列表
-    - max_workers: 最大并行数
-    """
+    """并行测试节点"""
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         total = len(nodes)
@@ -426,13 +447,16 @@ def test_nodes_batch(nodes, max_workers=20):
             futures.append((node, future))
             print(f"\r测试进度: {i}/{total}", end='')
         
-        print()  # 换行
+        print()
         
         for node, future in futures:
             try:
-                node['real_latency'] = future.result()
+                latency, is_working = future.result()
+                node['real_latency'] = latency
+                node['is_working'] = is_working
             except Exception as e:
                 node['real_latency'] = 999
+                node['is_working'] = False
 
 def process_rpc_list(input_file, output_file, batch_size=100):
     """分批处理RPC节点列表"""
@@ -463,6 +487,7 @@ def process_rpc_list(input_file, output_file, batch_size=100):
                         'ip': parts[1].strip(),
                         'reported_latency': reported_latency,
                         'real_latency': 999,
+                        'is_working': False,
                         'provider': parts[3].strip(),
                         'location': parts[4].strip() if len(parts) > 4 else 'Unknown',
                         'endpoint': f"https://{parts[1].strip()}:8899"
@@ -486,12 +511,12 @@ def process_rpc_list(input_file, output_file, batch_size=100):
         test_nodes_batch(batch)
         nodes.extend(batch)
     
-    # 按实际延迟排序
+    # 按实际延迟排序，但只考虑工作正常的节点
     print(f"\n\033[33m>>> 正在排序节点...\033[0m")
-    nodes.sort(key=lambda x: x['real_latency'])
+    nodes.sort(key=lambda x: (not x.get('is_working', False), x['real_latency']))
     
-    # 只保留延迟小于300ms的节点
-    valid_nodes = [n for n in nodes if n['real_latency'] < 300]
+    # 只保留正常工作且延迟小于300ms的节点
+    valid_nodes = [n for n in nodes if n.get('is_working', False) and n['real_latency'] < 300]
     
     # 保存到RPC文件
     print(f"\033[33m>>> 正在保存有效节点...\033[0m")
@@ -504,10 +529,11 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     # 打印节点信息
     print('\n当前最快的10个RPC节点:')
     print('=' * 100)
-    print(f"{'IP地址':15} | {'实测延迟':8} | {'报告延迟':8} | {'供应商':15} | {'位置':30}")
+    print(f"{'IP地址':15} | {'实测延迟':8} | {'报告延迟':8} | {'状态':6} | {'供应商':15} | {'位置':30}")
     print('-' * 100)
     for node in valid_nodes[:10]:
-        print(f"{node['ip']:15} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {node['provider']:15} | {node['location']:30}")
+        status = '\033[32m可用\033[0m' if node.get('is_working', False) else '\033[31m不可用\033[0m'
+        print(f"{node['ip']:15} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {status:8} | {node['provider']:15} | {node['location']:30}")
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
