@@ -747,18 +747,6 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from wcferry import Wcf
 
-#!/usr/bin/env python3
-import os
-import sys
-import time
-import json
-import logging
-import requests
-import urllib3
-from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor
-from wcferry import Wcf
-
 # 禁用SSL警告
 urllib3.disable_warnings()
 
