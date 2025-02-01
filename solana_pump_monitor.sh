@@ -790,28 +790,50 @@ EOF
                 ;;
             6)
                 echo -e "${YELLOW}>>> 开始扫描网络节点...${RESET}"
-                # 确保已安装solana-cli
+                # 检查并安装solana-cli
                 if ! command -v solana &> /dev/null; then
-                    echo -e "${RED}错误: 未安装solana-cli${RESET}"
-                    echo "请先安装: https://docs.solana.com/cli/install-solana-cli-tools"
-                    continue
+                    echo -e "${YELLOW}>>> 未检测到solana-cli，正在安装...${RESET}"
+                    if sudo curl -sSfL https://release.anza.xyz/v2.0.18/install | sh; then
+                        echo -e "${GREEN}>>> solana-cli 安装成功${RESET}"
+                        
+                        # 添加PATH
+                        SOLANA_PATH="/root/.local/share/solana/install/active_release/bin"
+                        if [[ ":$PATH:" != *":$SOLANA_PATH:"* ]]; then
+                            export PATH="$SOLANA_PATH:$PATH"
+                            # 添加到.profile文件
+                            echo "export PATH=\"$SOLANA_PATH:\$PATH\"" >> /root/.profile
+                            echo -e "${GREEN}>>> PATH已更新${RESET}"
+                        fi
+                        
+                        # 验证安装
+                        if ! command -v solana &> /dev/null; then
+                            echo -e "${RED}错误: PATH设置失败${RESET}"
+                            echo "请手动执行: export PATH=\"$SOLANA_PATH:\$PATH\""
+                            continue
+                        fi
+                        
+                        # 设置到主网
+                        solana config set --url mainnet-beta
+                    else
+                        echo -e "${RED}错误: solana-cli 安装失败${RESET}"
+                        echo "请手动安装: sudo curl -sSfL https://release.anza.xyz/v2.0.18/install | sh"
+                        continue
+                    fi
                 fi
                 
                 # 检查是否已连接到网络
                 if ! solana gossip &> /dev/null; then
-                    echo -e "${RED}错误: 未连接到Solana网络${RESET}"
-                    echo "请先运行: solana config set --url mainnet-beta"
-                    continue
+                    echo -e "${YELLOW}>>> 设置网络连接...${RESET}"
+                    if solana config set --url mainnet-beta; then
+                        echo -e "${GREEN}>>> 网络设置成功${RESET}"
+                    else
+                        echo -e "${RED}错误: 网络设置失败${RESET}"
+                        continue
+                    fi
                 fi
                 
                 # 运行扫描脚本
                 "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE" --scan-network
-                ;;
-            7)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选项!${RESET}"
                 ;;
         esac
     done
