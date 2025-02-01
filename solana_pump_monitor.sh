@@ -621,6 +621,7 @@ EOF
 # 生成Python监控脚本
 generate_python_script() {
     cat > $PY_SCRIPT << 'EOF'
+#!/usr/bin/env python3
 import os
 import sys
 import time
@@ -647,12 +648,14 @@ class TokenMonitor:
     def __init__(self):
         self.config_file = os.path.expanduser("~/.solana_pump.cfg")
         self.rpc_file = os.path.expanduser("~/.solana_pump.rpc")
+        self.watch_file = os.path.expanduser("~/.solana_pump/watch_addresses.json")
         self.config = self.load_config()
         self.api_keys = self.config.get('api_keys', [])
         self.current_key = 0
         self.request_counts = {}
         self.last_reset = {}
         self.wcf = None
+        self.watch_addresses = self.load_watch_addresses()
         self.init_wcf()
         
         for key in self.api_keys:
@@ -667,6 +670,16 @@ class TokenMonitor:
         except Exception as e:
             logging.error(f"加载配置失败: {e}")
             return {"api_keys": [], "serverchan": {"keys": []}, "wcf": {"groups": []}}
+
+    def load_watch_addresses(self):
+        """加载关注地址列表"""
+        try:
+            with open(self.watch_file) as f:
+                data = json.load(f)
+                return {addr['address']: addr['note'] for addr in data.get('addresses', [])}
+        except Exception as e:
+            logging.error(f"加载关注地址失败: {e}")
+            return {}
 
     def init_wcf(self):
         """初始化WeChatFerry"""
@@ -754,6 +767,7 @@ class TokenMonitor:
         try:
             related_addresses = set()
             relations = []
+            watch_hits = []  # 新增：记录命中的关注地址
             
             # 1. 分析转账历史
             headers = {"X-API-KEY": self.get_next_api_key()}
@@ -766,8 +780,23 @@ class TokenMonitor:
                     # 记录所有交互过的地址
                     if tx.get("from") and tx["from"] != creator:
                         related_addresses.add(tx["from"])
+                        # 检查是否是关注地址
+                        if tx["from"] in self.watch_addresses:
+                            watch_hits.append({
+                                'address': tx["from"],
+                                'note': self.watch_addresses[tx["from"]],
+                                'type': 'transfer_from'
+                            })
+                            
                     if tx.get("to") and tx["to"] != creator:
                         related_addresses.add(tx["to"])
+                        # 检查是否是关注地址
+                        if tx["to"] in self.watch_addresses:
+                            watch_hits.append({
+                                'address': tx["to"],
+                                'note': self.watch_addresses[tx["to"]],
+                                'type': 'transfer_to'
+                            })
                         
                     # 特别关注大额转账
                     if tx.get("amount", 0) > 1:  # 1 SOL以上的转账
@@ -810,11 +839,12 @@ class TokenMonitor:
             return {
                 "related_addresses": list(related_addresses),
                 "relations": relations,
+                "watch_hits": watch_hits,  # 新增：返回命中的关注地址
                 "risk_score": self.calculate_risk_score(relations)
             }
         except Exception as e:
             logging.error(f"分析地址关联性失败: {e}")
-            return {"related_addresses": [], "relations": [], "risk_score": 0}
+            return {"related_addresses": [], "relations": [], "watch_hits": [], "risk_score": 0}
 
     def calculate_risk_score(self, relations):
         """计算风险分数"""
@@ -862,7 +892,13 @@ class TokenMonitor:
 {mint}
 
 👤 创建者地址: 
-{creator}
+{creator}"""
+
+        # 添加关注地址信息
+        if creator in self.watch_addresses:
+            msg += f"\n⭐ 重点关注地址！\n备注: {self.watch_addresses[creator]}"
+
+        msg += f"""
 
 💰 代币信息:
 • 初始市值: ${token_info['market_cap']:,.2f}
@@ -874,6 +910,12 @@ class TokenMonitor:
 • 关联地址数: {len(relations['related_addresses'])}
 • 风险评分: {relations['risk_score']}/100
 """
+        
+        # 添加关联的关注地址信息
+        if relations['watch_hits']:
+            msg += "\n⚠️ 发现关联的关注地址:\n"
+            for hit in relations['watch_hits']:
+                msg += f"• {hit['address']}\n  备注: {hit['note']}\n  关联类型: {hit['type']}\n"
         
         # 添加重要关联信息
         important_relations = [r for r in relations['relations'] 
@@ -892,7 +934,7 @@ class TokenMonitor:
                     msg += f"• 大额转账: {r['amount']} SOL\n"
                     msg += f"  - 地址: {r['address'][:8]}...{r['address'][-6:]}\n"
                 elif r["type"] == "co_signer":
-                                        msg += f"• 共同签名: {r['address'][:8]}...{r['address'][-6:]}\n"
+                    msg += f"• 共同签名: {r['address'][:8]}...{r['address'][-6:]}\n"
         
         msg += "\n📜 历史代币记录:\n"
         for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:5]:
@@ -1065,7 +1107,110 @@ install_dependencies() {
     echo -e "${GREEN}✓ 依赖安装完成${RESET}"
 }
 
-# 主菜单
+# 关注地址管理
+manage_watch_addresses() {
+    WATCH_FILE="$HOME/.solana_pump/watch_addresses.json"
+    
+    # 确保文件存在
+    if [ ! -f "$WATCH_FILE" ]; then
+        echo '{"addresses":[]}' > "$WATCH_FILE"
+    fi
+    
+    while true; do
+        echo -e "\n${YELLOW}>>> 关注地址管理${RESET}"
+        echo "1. 添加关注地址"
+        echo "2. 删除关注地址"
+        echo "3. 查看关注列表"
+        echo "4. 导入地址列表"
+        echo "5. 返回主菜单"
+        echo -n "请选择 [1-5]: "
+        read choice
+        
+        case $choice in
+            1)
+                echo -e "${YELLOW}>>> 请输入要关注的地址：${RESET}"
+                read address
+                if [ ${#address} -eq 44 ]; then
+                    echo -e "${YELLOW}>>> 请输入备注信息：${RESET}"
+                    read note
+                    
+                    # 添加到JSON文件
+                    tmp=$(mktemp)
+                    jq --arg addr "$address" \
+                       --arg note "$note" \
+                       --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
+                       '.addresses += [{"address": $addr, "note": $note, "added_time": $time}]' \
+                       "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
+                    
+                    echo -e "${GREEN}✓ 地址已添加到关注列表${RESET}"
+                else
+                    echo -e "${RED}✗ 无效的Solana地址${RESET}"
+                fi
+                ;;
+            2)
+                addresses=$(jq -r '.addresses[] | "\(.address) [\(.note)]"' "$WATCH_FILE")
+                if [ ! -z "$addresses" ]; then
+                    echo -e "\n当前关注的地址："
+                    i=1
+                    while IFS= read -r line; do
+                        echo "$i. $line"
+                        i=$((i+1))
+                    done <<< "$addresses"
+                    
+                    echo -e "\n${YELLOW}>>> 请输入要删除的编号：${RESET}"
+                    read num
+                    if [[ $num =~ ^[0-9]+$ ]]; then
+                        tmp=$(mktemp)
+                        jq "del(.addresses[$(($num-1))])" "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
+                        echo -e "${GREEN}✓ 地址已从关注列表移除${RESET}"
+                    else
+                        echo -e "${RED}无效的编号${RESET}"
+                    fi
+                else
+                    echo -e "${YELLOW}没有关注的地址${RESET}"
+                fi
+                ;;
+            3)
+                addresses=$(jq -r '.addresses[] | "\(.address) [\(.note)] - 添加时间: \(.added_time)"' "$WATCH_FILE")
+                if [ ! -z "$addresses" ]; then
+                    echo -e "\n当前关注的地址："
+                    echo "=============================================="
+                    i=1
+                    while IFS= read -r line; do
+                        echo "$i. $line"
+                        i=$((i+1))
+                    done <<< "$addresses"
+                    echo "=============================================="
+                else
+                    echo -e "${YELLOW}没有关注的地址${RESET}"
+                fi
+                ;;
+            4)
+                echo -e "${YELLOW}>>> 请粘贴地址列表（每行格式：地址 备注），完成后按Ctrl+D：${RESET}"
+                while IFS= read -r line; do
+                    address=$(echo "$line" | awk '{print $1}')
+                    note=$(echo "$line" | cut -d' ' -f2-)
+                    if [ ${#address} -eq 44 ]; then
+                        tmp=$(mktemp)
+                        jq --arg addr "$address" \
+                           --arg note "$note" \
+                           --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
+                           '.addresses += [{"address": $addr, "note": $note, "added_time": $time}]' \
+                           "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
+                    fi
+                done
+                echo -e "${GREEN}✓ 地址导入完成${RESET}"
+                ;;
+            5)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效选项!${RESET}"
+                ;;
+        esac
+    done
+}
+
 show_menu() {
     echo -e "\n${BLUE}Solana Pump监控系统 v4.0${RESET}"
     echo "1. 启动监控"
@@ -1073,8 +1218,9 @@ show_menu() {
     echo "3. 切换前台显示"
     echo "4. RPC节点管理"
     echo "5. 通知设置"
-    echo "6. 退出"
-    echo -n "请选择 [1-6]: "
+    echo "6. 关注地址管理"  # 新增
+    echo "7. 退出"
+    echo -n "请选择 [1-7]: "
 }
 
 # 主程序
@@ -1098,7 +1244,8 @@ case $1 in
                 3) toggle_foreground ;;
                 4) manage_rpc ;;
                 5) setup_notification ;;
-                6) 
+                6) manage_watch_addresses ;;
+                7) 
                     if [ -f "$PIDFILE" ]; then
                         pid=$(cat "$PIDFILE")
                         kill "$pid" 2>/dev/null
@@ -1110,5 +1257,4 @@ case $1 in
             esac
         done
         ;;
-esac
-                    
+esac                
