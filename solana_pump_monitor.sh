@@ -329,140 +329,216 @@ EOF
 
 # RPC节点管理
 manage_rpc() {
-    echo -e "${YELLOW}>>> RPC节点管理${RESET}"
-    echo "1. 导入RPC节点列表"
-    echo "2. 查看当前节点"
-    echo "3. 测试节点延迟"
-    echo "4. 返回主菜单"
-    echo -n "请选择 [1-4]: "
-    read choice
-
-    case $choice in
-        1)
-            echo -e "${YELLOW}>>> 请粘贴RPC节点列表 (完成后按Ctrl+D)：${RESET}"
-            node_data=$(cat)
-            python3 -c "
-import sys, json, time, logging
+    while true; do
+        echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
+        echo "1. 导入RPC节点列表"
+        echo "2. 查看当前节点"
+        echo "3. 测试节点延迟"
+        echo "4. 返回主菜单"
+        echo -n "请选择 [1-4]: "
+        read choice
+        
+        case $choice in
+            1)
+                echo -e "${YELLOW}>>> 请粘贴RPC节点列表 (完成后按Ctrl+D)：${RESET}"
+                TMP_FILE=$(mktemp)
+                cat > "$TMP_FILE"
+                
+                # 生成Python处理脚本
+                cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
+#!/usr/bin/env python3
+import sys
+import json
+import time
+import requests
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 # 设置UTC+8时区
 TZ = timezone(timedelta(hours=8))
 
-logging.basicConfig(level=logging.INFO)
+def test_node_latency(node, timeout=3, retries=2):
+    """
+    测试RPC节点延迟
+    - timeout: 请求超时时间
+    - retries: 重试次数
+    返回最小延迟
+    """
+    endpoint = f"https://{node['ip'].strip()}:8899"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    data = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getHealth",
+    }
+    
+    latencies = []
+    for _ in range(retries):
+        try:
+            start_time = time.time()
+            response = requests.post(
+                endpoint, 
+                headers=headers,
+                json=data,
+                timeout=timeout,
+                verify=False  # 忽略SSL证书验证
+            )
+            end_time = time.time()
+            
+            if response.status_code == 200:
+                latency = (end_time - start_time) * 1000  # 转换为毫秒
+                latencies.append(latency)
+        except Exception as e:
+            continue
+            
+    return min(latencies) if latencies else 999
 
-class RPCManager:
-    def __init__(self):
-        self.rpc_nodes = []
-        self.config_file = '$RPC_FILE'
+def test_nodes_batch(nodes, max_workers=20):
+    """
+    并行测试一批节点
+    - nodes: 节点列表
+    - max_workers: 最大并行数
+    """
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        total = len(nodes)
+        
+        for i, node in enumerate(nodes, 1):
+            future = executor.submit(test_node_latency, node)
+            futures.append((node, future))
+            print(f"\r测试进度: {i}/{total}", end='')
+        
+        print()  # 换行
+        
+        for node, future in futures:
+            try:
+                node['real_latency'] = future.result()
+            except Exception as e:
+                node['real_latency'] = 999
 
-    def parse_rpc_list(self, data):
-        nodes = []
-        for line in data.split('\n'):
-            if '|' not in line or '===' in line:
+def process_rpc_list(input_file, output_file, batch_size=100):
+    """分批处理RPC节点列表"""
+    nodes = []
+    batch = []
+    batch_count = 0
+    
+    print(f"\n\033[33m>>> 开始处理RPC节点列表...\033[0m")
+    
+    # 禁用SSL警告
+    import urllib3
+    urllib3.disable_warnings()
+    
+    with open(input_file, 'r') as f:
+        for line in f:
+            if '|' not in line or '===' in line or '---' in line:
                 continue
+                
             try:
                 parts = [p.strip() for p in line.split('|')]
                 if len(parts) >= 4:
-                    latency = float(parts[2].replace('ms', ''))
+                    try:
+                        reported_latency = float(parts[2].replace('ms', ''))
+                    except:
+                        reported_latency = 999
+                    
                     node = {
-                        'ip': parts[1],
-                        'latency': latency,
-                        'provider': parts[3],
-                        'location': parts[4] if len(parts) > 4 else 'Unknown',
-                        'endpoint': f'https://{parts[1].strip()}:8899'
+                        'ip': parts[1].strip(),
+                        'reported_latency': reported_latency,
+                        'real_latency': 999,
+                        'provider': parts[3].strip(),
+                        'location': parts[4].strip() if len(parts) > 4 else 'Unknown',
+                        'endpoint': f"https://{parts[1].strip()}:8899"
                     }
-                    nodes.append(node)
+                    
+                    batch.append(node)
+                    
+                    if len(batch) >= batch_size:
+                        print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)...\033[0m")
+                        test_nodes_batch(batch)
+                        nodes.extend(batch)
+                        batch = []
+                        batch_count += 1
+                        
             except Exception as e:
-                logging.error(f'解析节点数据失败: {line} - {str(e)}')
                 continue
-        nodes.sort(key=lambda x: x['latency'])
-        return nodes
+    
+    # 处理最后一批
+    if batch:
+        print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)...\033[0m")
+        test_nodes_batch(batch)
+        nodes.extend(batch)
+    
+    # 按实际延迟排序
+    print(f"\n\033[33m>>> 正在排序节点...\033[0m")
+    nodes.sort(key=lambda x: x['real_latency'])
+    
+    # 只保留延迟小于300ms的节点
+    valid_nodes = [n for n in nodes if n['real_latency'] < 300]
+    
+    # 保存到RPC文件
+    print(f"\033[33m>>> 正在保存有效节点...\033[0m")
+    with open(output_file, 'w') as f:
+        for node in valid_nodes:
+            f.write(json.dumps(node) + '\n')
+    
+    print(f"\n\033[32m✓ {len(valid_nodes)} 个有效节点已保存到 {output_file}\033[0m")
+    
+    # 打印节点信息
+    print('\n当前最快的10个RPC节点:')
+    print('=' * 100)
+    print(f"{'IP地址':15} | {'实测延迟':8} | {'报告延迟':8} | {'供应商':15} | {'位置':30}")
+    print('-' * 100)
+    for node in valid_nodes[:10]:
+        print(f"{node['ip']:15} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {node['provider']:15} | {node['location']:30}")
 
-    def add_nodes(self, data):
-        new_nodes = self.parse_rpc_list(data)
-        if not new_nodes:
-            logging.error('没有解析到有效的节点数据')
-            return False
-        valid_nodes = [n for n in new_nodes if n['latency'] < 300]
-        if not valid_nodes:
-            logging.error('没有找到延迟合格的节点')
-            return False
-        self.rpc_nodes = valid_nodes
-        self.save_nodes()
-        logging.info(f'已添加 {len(valid_nodes)} 个有效节点')
-        self.print_nodes()
-        return True
-
-    def save_nodes(self):
-        try:
-            with open(self.config_file, 'w') as f:
-                for node in self.rpc_nodes:
-                    f.write(json.dumps(node) + '\n')
-            logging.info(f'节点信息已保存到 {self.config_file}')
-        except Exception as e:
-            logging.error(f'保存节点信息失败: {str(e)}')
-
-    def print_nodes(self):
-        print('\n当前RPC节点列表:')
-        print('=' * 80)
-        print(f\"{'IP地址':15} | {'延迟':7} | {'供应商':15} | {'位置':30}\")
-        print('-' * 80)
-        for node in self.rpc_nodes:
-            print(f\"{node['ip']:15} | {node['latency']:5.1f}ms | {node['provider']:15} | {node['location']:30}\")
-
-manager = RPCManager()
-manager.add_nodes('''$node_data''')" || echo -e "${RED}处理节点数据失败${RESET}"
-            ;;
-        2)
-            if [ -f "$RPC_FILE" ]; then
-                echo -e "${GREEN}当前RPC节点列表：${RESET}"
-                python3 -c "
-import json
-with open('$RPC_FILE') as f:
-    print('=' * 80)
-    print(f\"{'IP地址':15} | {'延迟':7} | {'供应商':15} | {'位置':30}\")
-    print('-' * 80)
-    for line in f:
-        node = json.loads(line)
-        print(f\"{node['ip']:15} | {node['latency']:5.1f}ms | {node['provider']:15} | {node['location']:30}\")
-"
-            else
-                echo -e "${RED}未找到RPC节点配置文件${RESET}"
-            fi
-            ;;
-        3)
-            if [ -f "$RPC_FILE" ]; then
-                echo -e "${YELLOW}>>> 测试节点延迟...${RESET}"
-                python3 -c "
-import json, requests, time
-with open('$RPC_FILE', 'r') as f:
-    nodes = [json.loads(line) for line in f]
-
-for node in nodes:
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print("Usage: python3 process_rpc.py input_file output_file")
+        sys.exit(1)
+    
     try:
-        start = time.time()
-        resp = requests.post(
-            node['endpoint'],
-            json={'jsonrpc':'2.0','id':1,'method':'getHealth'},
-            timeout=3
-        )
-        latency = (time.time() - start) * 1000
-        status = '✓' if resp.status_code == 200 else '✗'
-        print(f\"{status} {node['ip']:15} | {latency:5.1f}ms\")
-    except:
-        print(f\"✗ {node['ip']:15} | 超时\")
-"
-            else
-                echo -e "${RED}未找到RPC节点配置文件${RESET}"
-            fi
-            ;;
-        4)
-            return
-            ;;
-        *)
-            echo -e "${RED}无效选项!${RESET}"
-            ;;
-    esac
+        process_rpc_list(sys.argv[1], sys.argv[2])
+    except Exception as e:
+        print(f"\n\033[31m错误: {e}\033[0m")
+        sys.exit(1)
+EOF
+
+                chmod +x "$HOME/.solana_pump/process_rpc.py"
+                
+                # 运行处理脚本
+                "$HOME/.solana_pump/process_rpc.py" "$TMP_FILE" "$RPC_FILE"
+                rm -f "$TMP_FILE"
+                ;;
+            2)
+                if [ -f "$RPC_FILE" ]; then
+                    echo -e "\n${YELLOW}>>> 当前RPC节点列表：${RESET}"
+                    cat "$RPC_FILE"
+                else
+                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
+                fi
+                ;;
+            3)
+                if [ -f "$RPC_FILE" ]; then
+                    echo -e "${YELLOW}>>> 开始测试节点延迟...${RESET}"
+                    "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE.new"
+                    if [ $? -eq 0 ]; then
+                        mv "$RPC_FILE.new" "$RPC_FILE"
+                    fi
+                else
+                    echo -e "${RED}>>> RPC节点列表为空${RESET}"
+                fi
+                ;;
+            4)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效选项!${RESET}"
+                ;;
+        esac
+    done
 }
 
 # 生成Python监控脚本
