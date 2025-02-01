@@ -550,248 +550,193 @@ mainnet.rpcpool.com | 100 | Slope | Global'
 # 生成RPC处理脚本
 generate_rpc_script() {
     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
-#!/usr/bin/env python3
-import os
-import sys
-import time
-import json
-import requests
-import subprocess
-import re
-from concurrent.futures import ThreadPoolExecutor
-import urllib3
-urllib3.disable_warnings()
-
-def scan_network_nodes():
-    """通过solana gossip获取网络节点"""
-    print(f"\n\033[33m>>> 正在获取Solana网络节点列表...\033[0m")
-    
-    try:
-        # 执行solana gossip命令获取节点列表
-        result = subprocess.run(['solana', 'gossip'], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise Exception("获取节点列表失败")
-            
-        # 解析输出，提取IP地址
-        nodes = []
-        processed_ips = set()
-        
-        for line in result.stdout.split('\n'):
-            if not line or 'IP Address' in line or '--------' in line:
-                continue
-                
-            # 使用正则提取IP地址
-            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
-            if ip_match:
-                ip = ip_match.group(1)
-                if ip not in processed_ips:
-                    processed_ips.add(ip)
-                    nodes.append({
-                        'ip': ip,
-                        'reported_latency': 999,
-                        'real_latency': 999,
-                        'is_working': False,
-                        'provider': 'Network Node',
-                        'location': 'Unknown'
-                    })
-        
-        print(f"发现 {len(nodes)} 个网络节点")
-        return nodes
-        
-    except Exception as e:
-        print(f"\n\033[31m错误: {e}\033[0m")
-        return []
-
-def test_node_latency(node, timeout=3, retries=2):
-    """测试RPC节点延迟和可用性"""
-    ip = node['ip'].strip()
-    
-    if ip.startswith('http://') or ip.startswith('https://'):
-        endpoint = ip
-    else:
-        base_ip = ip.split(':')[0]
-        if ':' not in ip:
-            endpoint = f"https://{base_ip}:8899"
+def test_node_health(node, timeout=3):
+    """测试节点健康状态"""
+    if not node.endpoint:
+        if node.ip.startswith('http'):
+            node.endpoint = node.ip
         else:
-            endpoint = f"https://{ip}"
+            base_ip = node.ip.split(':')[0]
+            node.endpoint = f"https://{node.ip}" if ':' in node.ip else f"https://{base_ip}:8899"
+
+    headers = {"Content-Type": "application/json"}
     
-    headers = {
-        "Content-Type": "application/json"
-    }
+    # 定义测试项目
+    checks = [
+        {"method": "getHealth", "params": []},
+        {"method": "getVersion", "params": []},
+        {"method": "getSlot", "params": []},
+        {"method": "getVoteAccounts", "params": []},
+        {"method": "getClusterNodes", "params": []}
+    ]
     
-    slot_data = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getSlot",
-    }
+    health_score = 0
+    start_time = time.time()
     
-    health_data = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getHealth",
-    }
-    
-    latencies = []
-    is_working = False
-    
-    for _ in range(retries):
+    for check in checks:
         try:
             response = requests.post(
-                endpoint, 
+                node.endpoint,
                 headers=headers,
-                json=slot_data,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": check["method"],
+                    "params": check["params"]
+                },
                 timeout=timeout,
                 verify=False
             )
             
             if response.status_code == 200:
-                slot_result = response.json()
-                if 'result' in slot_result:
-                    start_time = time.time()
-                    response = requests.post(
-                        endpoint, 
-                        headers=headers,
-                        json=health_data,
-                        timeout=timeout,
-                        verify=False
-                    )
-                    end_time = time.time()
+                result = response.json().get("result")
+                if result:
+                    health_score += 20  # 每项检查20分
                     
-                    if response.status_code == 200:
-                        latency = (end_time - start_time) * 1000
-                        latencies.append(latency)
-                        is_working = True
+                    # 保存特定检查结果
+                    if check["method"] == "getVersion":
+                        node.version = result.get("solana-core")
+                    elif check["method"] == "getSlot":
+                        node.slot = result
+                    elif check["method"] == "getVoteAccounts":
+                        node.vote_accounts = result
+                    elif check["method"] == "getClusterNodes":
+                        node.cluster_nodes = result
                         
         except Exception as e:
+            node.error_count += 1
             continue
-            
-    return (min(latencies) if latencies else 999, is_working)
+    
+    node.real_latency = (time.time() - start_time) * 1000
+    node.health_score = health_score
+    node.is_working = health_score >= 60  # 至少通过3项检查
+    node.last_checked = time.time()
+    
+    if node.is_working:
+        node.success_count += 1
+    
+    return node
 
 def test_nodes_batch(nodes, max_workers=20):
     """并行测试节点"""
+    manager = RPCManager()
+    working_nodes = []
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         total = len(nodes)
         working_count = 0
         
-        for i, node in enumerate(nodes, 1):
-            future = executor.submit(test_node_latency, node)
+        print(f"\n\033[33m>>> 开始测试 {total} 个节点...\033[0m")
+        print('=' * 120)
+        print(f"{'节点地址':50} | {'延迟':8} | {'健康分':8} | {'状态':6} | {'供应商':15} | {'位置':20}")
+        print('-' * 120)
+        
+        for node in nodes:
+            future = executor.submit(test_node_health, node)
             futures.append((node, future))
-            
+        
         for i, (node, future) in enumerate(futures, 1):
             try:
-                latency, is_working = future.result()
-                node['real_latency'] = latency
-                node['is_working'] = is_working
-                if is_working:
+                tested_node = future.result()
+                if tested_node.is_working:
                     working_count += 1
-                status = '\033[32m可用\033[0m' if is_working else '\033[31m不可用\033[0m'
-                print(f"\r处理: {i}/{total} | 节点: {node['ip']:50} | 延迟: {latency:6.1f}ms | 状态: {status} | 可用率: {working_count/i*100:5.1f}%", end='\n')
-            except Exception as e:
-                node['real_latency'] = 999
-                node['is_working'] = False
-                print(f"\r处理: {i}/{total} | 节点: {node['ip']:50} | 延迟: 999.0ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
-def process_rpc_list(input_file, output_file, scan_network=False, batch_size=100):
-    """分批处理RPC节点列表"""
-    nodes = []
-    batch = []
-    batch_count = 0
-    processed_ips = set()
-    total_lines = 0
-    valid_lines = 0
-    
-    print(f"\n\033[33m>>> 开始处理RPC节点列表...\033[0m")
-    
-    # 从文件读取节点
-    with open(input_file, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):  # 跳过空行和注释
-                continue
+                    working_nodes.append(tested_node)
                 
-            total_lines += 1
-            if '|' in line:
-                valid_lines += 1
+                # 更新节点历史
+                manager.update_node_history(tested_node)
+                
+                # 获取节点统计信息
+                stats = manager.get_node_stats(tested_node)
+                status = '\033[32m可用\033[0m' if tested_node.is_working else '\033[31m不可用\033[0m'
+                
+                print(f"{tested_node.ip:50} | {tested_node.real_latency:6.1f}ms | {tested_node.health_score:6.0f}/100 | {status:8} | {tested_node.provider:15} | {tested_node.location:20}")
+                
+            except Exception as e:
+                print(f"\033[31m测试节点失败 {node.ip}: {str(e)}\033[0m")
+                continue
+    
+    # 保存历史记录
+    manager.save_history()
+    
+    return working_nodes
+
+def process_rpc_list(input_file, output_file, scan_network=False):
+    """处理RPC节点列表"""
+    nodes = []
+    processed_ips = set()
+    
+    # 读取文件中的节点
+    if os.path.exists(input_file):
+        print(f"\n\033[33m>>> 正在读取节点列表: {input_file}\033[0m")
+        with open(input_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
                 try:
-                    parts = [p.strip() for p in line.split('|')]
-                    if len(parts) >= 2:
-                        ip = parts[0].strip()
-                        base_ip = ip.split(':')[0].replace('https://', '').replace('http://', '')
-                        
-                        if base_ip not in processed_ips:
-                            processed_ips.add(base_ip)
-                            try:
-                                reported_latency = float(parts[1].replace('ms', ''))
-                            except:
-                                reported_latency = 999
+                    if '|' in line:
+                        parts = [p.strip() for p in line.split('|')]
+                        if len(parts) >= 2:
+                            ip = parts[0]
+                            base_ip = ip.split(':')[0].replace('https://', '').replace('http://', '')
                             
-                            node = {
-                                'ip': ip,
-                                'reported_latency': reported_latency,
-                                'real_latency': 999,
-                                'is_working': False,
-                                'provider': parts[2].strip() if len(parts) > 2 else 'Unknown',
-                                'location': parts[3].strip() if len(parts) > 3 else 'Unknown'
-                            }
-                            batch.append(node)
-                            
-                            if len(batch) >= batch_size:
-                                print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
-                                test_nodes_batch(batch)
-                                nodes.extend(batch)
-                                batch = []
-                                batch_count += 1
+                            if base_ip not in processed_ips:
+                                processed_ips.add(base_ip)
+                                node = RPCNode(
+                                    ip=ip,
+                                    provider=parts[2] if len(parts) > 2 else 'Unknown',
+                                    location=parts[3] if len(parts) > 3 else 'Unknown'
+                                )
+                                try:
+                                    node.reported_latency = float(parts[1].replace('ms', ''))
+                                except:
+                                    pass
+                                nodes.append(node)
                 except Exception as e:
                     print(f"\033[31m处理节点失败: {line} ({str(e)})\033[0m")
                     continue
     
-    # 处理最后一批
-    if batch:
-        print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
-        test_nodes_batch(batch)
-        nodes.extend(batch)
-
+    # 扫描网络节点
+    if scan_network:
+        network_nodes = scan_network_nodes()
+        for node in network_nodes:
+            if node.ip.split(':')[0] not in processed_ips:
+                nodes.append(node)
     
-    # 重新测试所有节点
-    print(f"\n\033[33m>>> 重新测试所有节点...\033[0m")
-    test_nodes_batch(nodes)
+    if not nodes:
+        print("\n\033[31m错误: 没有找到可用的节点\033[0m")
+        return
     
-    # 按实际延迟排序
-    print(f"\n\033[33m>>> 正在排序节点...\033[0m")
-    nodes.sort(key=lambda x: (not x.get('is_working', False), x['real_latency']))
+    # 测试节点
+    working_nodes = test_nodes_batch(nodes)
     
-    # 只保留正常工作且延迟小于300ms的节点
-    valid_nodes = [n for n in nodes if n.get('is_working', False) and n['real_latency'] < 300]
+    # 按延迟和健康分排序
+    working_nodes.sort(key=lambda x: (100 - x.health_score, x.real_latency))
     
-    # 保存到RPC文件
-    print(f"\033[33m>>> 正在保存有效节点...\033[0m")
-    with open(output_file, 'w') as f:
-        for node in valid_nodes:
-            # 构建endpoint
-            ip = node['ip']
-            if not (ip.startswith('http://') or ip.startswith('https://')):
-                if ':' not in ip:
-                    node['endpoint'] = f"https://{ip}:8899"
-                else:
-                    node['endpoint'] = f"https://{ip}"
-            else:
-                node['endpoint'] = ip
-            f.write(json.dumps(node) + '\n')
-    
-    print(f"\n\033[32m✓ 处理完成")
-    print(f"总节点数: {len(nodes)}")
-    print(f"有效节点数: {len(valid_nodes)}")
-    print(f"可用率: {len(valid_nodes)/len(nodes)*100:.1f}%")
-    print(f"结果已保存到: {output_file}\033[0m")
-    
-    # 打印节点信息
-    print('\n当前最快的10个RPC节点:')
-    print('=' * 120)
-    print(f"{'节点地址':50} | {'实测延迟':8} | {'报告延迟':8} | {'状态':6} | {'供应商':15} | {'位置':20}")
-    print('-' * 120)
-    for node in valid_nodes[:10]:
-        status = '\033[32m可用\033[0m' if node.get('is_working', False) else '\033[31m不可用\033[0m'
-        print(f"{node['ip']:50} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {status:8} | {node['provider']:15} | {node['location']:20}")
+    # 保存结果
+    if working_nodes:
+        print(f"\n\033[33m>>> 正在保存 {len(working_nodes)} 个有效节点到 {output_file}\033[0m")
+        with open(output_file, 'w') as f:
+            for node in working_nodes:
+                f.write(json.dumps(node.to_dict()) + '\n')
+        
+        print(f"\n\033[32m✓ 处理完成")
+        print(f"总节点数: {len(nodes)}")
+        print(f"有效节点数: {len(working_nodes)}")
+        print(f"可用率: {len(working_nodes)/len(nodes)*100:.1f}%")
+        
+        # 打印最佳节点
+        print('\n最佳RPC节点 (前10个):')
+        print('=' * 120)
+        print(f"{'节点地址':50} | {'延迟':8} | {'健康分':8} | {'版本':10} | {'供应商':15} | {'位置':20}")
+        print('-' * 120)
+        
+        for node in working_nodes[:10]:
+            print(f"{node.ip:50} | {node.real_latency:6.1f}ms | {node.health_score:6.0f}/100 | {node.version or 'Unknown':10} | {node.provider:15} | {node.location:20}")
+    else:
+        print("\n\033[31m错误: 没有找到可用的节点\033[0m")
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
