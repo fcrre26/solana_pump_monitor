@@ -452,6 +452,14 @@ manage_watch_addresses() {
 #===========================================
 # RPC节点处理模块
 #===========================================
+#===========================================
+# RPC节点处理模块
+#===========================================
+
+# 全局配置
+RPC_DIR="$HOME/.solana_pump"
+RPC_FILE="$RPC_DIR/rpc.txt"
+CUSTOM_NODES="$RPC_DIR/custom_nodes.txt"
 
 # 状态指示图标
 STATUS_OK="🟢"
@@ -490,6 +498,14 @@ DEFAULT_RPC_NODES=(
     "https://mainnet.rpcpool.com|RPCPool Mainnet"
     "https://api.solanium.io|Solanium"
 )
+
+# 初始化RPC配置
+init_rpc_config() {
+    mkdir -p "$RPC_DIR"
+    if [ ! -f "$RPC_FILE" ]; then
+        test_default_nodes "$RPC_FILE"
+    fi
+}
 
 # 测试RPC节点延迟和可用性
 test_rpc_node() {
@@ -601,16 +617,26 @@ test_all_nodes() {
 # 测试默认节点
 test_default_nodes() {
     local output_file="$1"
-    local temp_file="/tmp/default_nodes.txt"
+    local temp_file="$RPC_DIR/temp_nodes.txt"
     
     # 写入默认节点到临时文件
-    printf "%s\n" "${DEFAULT_RPC_NODES[@]}" > "$temp_file"
+    > "$temp_file"
+    for node in "${DEFAULT_RPC_NODES[@]}"; do
+        echo "$node" >> "$temp_file"
+    done
     
     # 测试节点
     test_all_nodes "$temp_file" "$output_file"
     
     # 清理临时文件
     rm -f "$temp_file"
+    
+    # 验证输出文件
+    if [ -f "$output_file" ]; then
+        echo -e "${GREEN}✓ RPC配置已更新${RESET}"
+    else
+        echo -e "${RED}✗ RPC配置更新失败${RESET}"
+    fi
 }
 
 # 添加自定义节点
@@ -630,9 +656,8 @@ add_custom_node() {
 
 # RPC节点管理主函数
 manage_rpc() {
-    local RPC_FILE="$HOME/.solana_pump/rpc.txt"
-    local CUSTOM_NODES="$HOME/.solana_pump/custom_nodes.txt"
-    mkdir -p "$HOME/.solana_pump"
+    # 确保配置已初始化
+    init_rpc_config
     
     while true; do
         echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
@@ -701,9 +726,8 @@ manage_rpc() {
     done
 }
 
-#===========================================
-# Python监控核心模块
-#===========================================
+
+
 #===========================================
 # Python监控核心模块
 #===========================================
