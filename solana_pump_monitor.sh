@@ -797,8 +797,14 @@ EOF
 }
 
 #===========================================
-# Python监控核心模块 (pump_monitor.py)
+# Python监控核心模块
 #===========================================
+
+# 生成Python监控脚本
+generate_python_script() {
+    echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
+    mkdir -p "$(dirname "$PY_SCRIPT")"
+    cat > "$PY_SCRIPT" << 'EOFPYTHON'
 #!/usr/bin/env python3
 import os
 import sys
@@ -816,15 +822,6 @@ urllib3.disable_warnings()
 
 # 设置UTC+8时区
 TZ = timezone(timedelta(hours=8))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('monitor.log'),
-        logging.StreamHandler()
-    ]
-)
 
 class TokenMonitor:
     def __init__(self):
@@ -854,7 +851,6 @@ class TokenMonitor:
         self.cache_expire = 3600  # 缓存1小时过期
 
     def load_config(self):
-        """加载配置文件"""
         try:
             with open(self.config_file) as f:
                 return json.load(f)
@@ -863,7 +859,6 @@ class TokenMonitor:
             return {"api_keys": [], "serverchan": {"keys": []}, "wcf": {"groups": []}}
 
     def load_watch_addresses(self):
-        """加载关注地址列表"""
         try:
             with open(self.watch_file) as f:
                 data = json.load(f)
@@ -873,7 +868,6 @@ class TokenMonitor:
             return {}
 
     def init_wcf(self):
-        """初始化WeChatFerry"""
         if self.config['wcf']['groups']:
             try:
                 self.wcf = Wcf()
@@ -961,6 +955,7 @@ class TokenMonitor:
             "holder_concentration": 0,
             "verified": False
         }
+
     def analyze_creator_history(self, creator):
         """分析创建者历史记录"""
         # 检查缓存
@@ -1130,7 +1125,8 @@ class TokenMonitor:
                 "high_value_relations": [],
                 "risk_score": 0
             }
-                def _analyze_cosigners(self, address, creator):
+
+    def _analyze_cosigners(self, address, creator):
         """分析共同签名者（辅助函数）"""
         try:
             tx_url = f"https://public-api.solscan.io/account/transactions?account={address}"
@@ -1255,17 +1251,18 @@ class TokenMonitor:
   - 创建代币总数: {relation['total_created']}
   - 高价值代币数: {len(relation['tokens'])}"""
                 for token in relation['tokens'][:2]:  # 每个地址只显示前2个高价值代币
-                    creation_time = datetime.fromtimestamp(token["timestamp"], tz=TZ)
+                    creation_time = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
                     msg += f"""
   - {token['mint']}
     创建时间: {creation_time.strftime('%Y-%m-%d %H:%M:%S')}
     最高市值: ${token['max_market_cap']:,.2f}
     当前市值: ${token['current_market_cap']:,.2f}"""
-            # 添加关联的关注地址信息
+
+        # 添加关联的关注地址信息
         if relations['watch_hits']:
             msg += "\n\n⚠️ 发现关联的关注地址:"
             for hit in relations['watch_hits']:
-                timestamp = datetime.fromtimestamp(hit["timestamp"], tz=TZ)
+                timestamp = datetime.fromtimestamp(hit["timestamp"], tz=timezone(timedelta(hours=8)))
                 msg += f"""
 • {hit['address']}
   - 备注: {hit['note']}
@@ -1286,7 +1283,7 @@ class TokenMonitor:
 
 最近代币记录:"""
             for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:3]:
-                timestamp = datetime.fromtimestamp(token["timestamp"], tz=TZ)
+                timestamp = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
                 msg += f"""
 • {token['mint']}
   - 创建时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1313,7 +1310,7 @@ class TokenMonitor:
 • Solscan: https://solscan.io/token/{mint}
 • 创建者: https://solscan.io/account/{creator}
 
-⏰ 发现时间: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)
+⏰ 发现时间: {datetime.now(tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)
 """
         return msg
 
@@ -1402,8 +1399,23 @@ class TokenMonitor:
                 time.sleep(10)
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('monitor.log'),
+            logging.StreamHandler()
+        ]
+    )
     monitor = TokenMonitor()
     monitor.monitor()
+EOFPYTHON
+
+    chmod +x "$PY_SCRIPT"
+    echo -e "${GREEN}✓ 监控脚本已生成${RESET}"
+}
+
+
 #===========================================
 # RPC节点处理模块 (process_rpc.py)
 #===========================================
