@@ -481,7 +481,16 @@ generate_rpc_script() {
     mkdir -p "$HOME/.solana_pump"
     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOFPYTHON'
 #!/usr/bin/env python3
+import os
+import sys
+import json
+import time
+import socket
+import requests
+import concurrent.futures
+from typing import List, Dict, Optional
 
+#!/usr/bin/env python3
 class RPCNode:
     def __init__(self, ip, provider="Unknown", location="Unknown"):
         self.ip = ip
@@ -723,12 +732,23 @@ EOFPYTHON
 #===========================================
 # Python监控核心模块
 #===========================================
-
 # 生成Python监控脚本
 generate_python_script() {
     echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
     mkdir -p "$(dirname "$PY_SCRIPT")"
     cat > "$PY_SCRIPT" << 'EOFPYTHON'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import json
+import logging
+import requests
+import urllib3
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from wcferry import Wcf
+
 #!/usr/bin/env python3
 import os
 import sys
