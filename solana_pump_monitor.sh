@@ -2071,21 +2071,24 @@ case $1 in
         while true; do
             show_menu
             read choice
-case $choice in
-    1) start_monitor ;;
-    2) init_config ;;
-    3) toggle_foreground ;;
-    4) manage_rpc ;;
-    5) setup_notification ;;
-    6) manage_watch_addresses ;;
-    7) manage_environment ;;  # 新增选项处理
-    8) 
-        if [ -f "$PIDFILE" ]; then
-            pid=$(cat "$PIDFILE")
-            kill "$pid" 2>/dev/null
-            rm "$PIDFILE"
-        fi
-        exit 0 
+            case $choice in
+                1) start_monitor ;;
+                2) init_config ;;
+                3) toggle_foreground ;;
+                4) manage_rpc ;;
+                5) setup_notification ;;
+                6) manage_watch_addresses ;;
+                7) manage_environment ;;
+                8) 
+                    if [ -f "$PIDFILE" ]; then
+                        pid=$(cat "$PIDFILE")
+                        kill "$pid" 2>/dev/null
+                        rm "$PIDFILE"
+                    fi
+                    exit 0 
+                    ;;
+                *) echo -e "${RED}无效选项!${RESET}" ;;
+            esac
+        done
         ;;
-    *) echo -e "${RED}无效选项!${RESET}" ;;
 esac
