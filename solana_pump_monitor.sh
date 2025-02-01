@@ -489,8 +489,6 @@ import socket
 import requests
 import concurrent.futures
 from typing import List, Dict, Optional
-
-#!/usr/bin/env python3
 class RPCNode:
     def __init__(self, ip, provider="Unknown", location="Unknown"):
         self.ip = ip
