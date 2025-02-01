@@ -524,6 +524,7 @@ import time
 import socket
 import requests
 import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor  # 新增这行
 from typing import List, Dict, Optional
 class RPCNode:
     def __init__(self, ip, provider="Unknown", location="Unknown"):
