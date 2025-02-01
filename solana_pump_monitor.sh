@@ -364,7 +364,7 @@ EOF
 # 生成RPC处理脚本
 generate_rpc_script() {
     mkdir -p "$HOME/.solana_pump"
-    cat > "$HOME/.solana_pump/process_rpc.py" << 'ENDOFPYTHON'
+    cat > "$HOME/.solana_pump/process_rpc.py" << \ENDOFSCRIPT
 #!/usr/bin/env python3
 import os
 import sys
@@ -558,7 +558,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"\n\033[31m错误: {e}\033[0m")
         sys.exit(1)
-ENDOFPYTHON
+ENDOFSCRIPT
 
     chmod +x "$HOME/.solana_pump/process_rpc.py"
     echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
@@ -566,10 +566,11 @@ ENDOFPYTHON
 # RPC节点管理主函数
 manage_rpc() {
     ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
+    RPC_FILE="$HOME/.solana_pump/rpc.txt"
     mkdir -p "$HOME/.solana_pump"
     
     # 默认公共RPC节点列表
-    DEFAULT_RPC_NODES=$(cat << 'EOF'
+    DEFAULT_RPC_NODES=$(cat << \EOFRPC
 https://api.mainnet-beta.solana.com | 0 | Solana | Official Public RPC
 https://solana-api.projectserum.com | 0 | Project Serum | Public RPC
 https://rpc.ankr.com/solana | 0 | Ankr | Public RPC
@@ -580,7 +581,7 @@ https://api.solscan.io | 0 | Solscan | Public RPC
 https://solana.public-rpc.com | 0 | GenesysGo | Public RPC
 https://ssc-dao.genesysgo.net | 0 | GenesysGo | SSC Public RPC
 https://free.rpcpool.com | 0 | RPCPool | Free Public RPC
-EOF
+EOFRPC
 )
     
     # 检查并安装 Solana CLI
@@ -646,6 +647,7 @@ EOF
         fi
     }
     
+    # 主菜单循环
     while true; do
         echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
         echo "1. 导入节点列表"
