@@ -1,5 +1,8 @@
 #!/bin/bash
 
+#===========================================
+# 基础配置模块
+#===========================================
 # Solana Pump.fun智能监控系统 v4.0
 # 功能：全自动监控+市值分析+多API轮询+智能RPC管理+多通道通知
 
@@ -16,7 +19,9 @@ YELLOW='\033[33m'
 BLUE='\033[34m'
 RESET='\033[0m'
 
-# 初始化配置
+#===========================================
+# 配置管理模块
+#===========================================
 init_config() {
     echo -e "${YELLOW}>>> 配置API密钥 (支持多个，每行一个)${RESET}"
     echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
@@ -45,7 +50,29 @@ init_config() {
     echo -e "\n${GREEN}✓ 配置已保存到 $CONFIG_FILE${RESET}"
 }
 
-# 通知设置
+# 依赖安装
+install_dependencies() {
+    echo -e "${YELLOW}>>> 检查系统依赖...${RESET}"
+    
+    if command -v apt &>/dev/null; then
+        PKG_MGR="apt"
+        sudo apt update
+    elif command -v yum &>/dev/null; then
+        PKG_MGR="yum"
+    else
+        echo -e "${RED}✗ 不支持的系统!${RESET}"
+        exit 1
+    fi
+
+    sudo $PKG_MGR install -y python3 python3-pip jq
+    pip3 install requests wcferry
+
+    echo -e "${GREEN}✓ 依赖安装完成${RESET}"
+}
+
+#===========================================
+# 通知系统模块
+#===========================================
 setup_notification() {
     while true; do
         echo -e "\n${YELLOW}>>> 通知设置${RESET}"
@@ -326,9 +353,9 @@ def send_test_notification():
 send_test_notification()
 EOF
 }
-
-# RPC节点管理
-# RPC节点管理
+#===========================================
+# RPC节点管理模块
+#===========================================
 manage_rpc() {
     ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
     mkdir -p "$HOME/.solana_pump"
@@ -348,124 +375,6 @@ manage_rpc() {
         generate_rpc_script
     fi
     
-    # 默认公共RPC节点列表
-    DEFAULT_RPC_NODES='# Solana 官方公共RPC节点
-api.mainnet-beta.solana.com | 100 | Solana | Official Mainnet
-api.devnet.solana.com | 100 | Solana | Official Devnet
-
-# GenesysGo
-ssc-dao.genesysgo.net | 100 | GenesysGo | US
-free.rpcpool.com | 100 | GenesysGo | US
-
-# Ankr
-rpc.ankr.com/solana | 100 | Ankr | Global
-
-# Triton
-solana-api.projectserum.com | 100 | Project Serum | US
-
-# QuickNode
-solana-mainnet.rpc.extrnode.com | 100 | QuickNode | Global
-
-# Alchemy
-solana-mainnet.g.alchemy.com | 100 | Alchemy | Global
-
-# Figment
-solana-rpc.publicnode.com | 100 | Figment | Global
-
-# Helius
-rpc.helius.xyz | 100 | Helius | US
-
-# RunNode
-mainnet.rpcpool.com | 100 | RunNode | Global
-
-# Serum
-solana-api.projectserum.com | 100 | Serum | US
-
-# Triton
-rpc.solana.theindex.io | 100 | Triton | Global
-
-# Chainstack
-solana-mainnet.chainstack.com | 100 | Chainstack | Global
-
-# BlockDaemon
-mainnet.solana.blockdaemon.tech | 100 | BlockDaemon | US
-
-# 33.cn
-rpc.33.cn | 100 | 33.cn | China
-rpc.33.cn:8899 | 100 | 33.cn | China
-
-# MetaBlock
-api.metablocks.world/solana | 100 | MetaBlock | Global
-
-# Syndica
-solana-mainnet.syndica.io | 100 | Syndica | Global
-
-# NOWNodes
-solana.nownodes.io | 100 | NOWNodes | Global
-
-# GetBlock
-sol.getblock.io | 100 | GetBlock | Global
-
-# Pocket Network
-solana-mainnet.gateway.pokt.network | 100 | Pocket | Global
-
-# Blockdaemon
-mainnet.solana.blockdaemon.tech | 100 | Blockdaemon | US
-
-# Allnodes
-solana.public-rpc.com | 100 | Allnodes | Global
-
-# Solana Beach
-rpc.solanabeach.io | 100 | SolanaBeach | Global
-
-# Solflare
-rpc.solflare.com | 100 | Solflare | Global
-
-# Validators
-validator.rpcpool.com | 100 | Validators | Global
-
-# Solana FM
-mainnet-beta.rpc.solanafm.com | 100 | SolanaFM | Global
-
-# Solanium
-rpc.solanium.io | 100 | Solanium | Global
-
-# Solscan
-api.solscan.io | 100 | Solscan | Global
-
-# Raydium
-raydium.rpcpool.com | 100 | Raydium | Global
-
-# Magic Eden
-rpc-mainnet.magiceden.io | 100 | MagicEden | Global
-
-# Jupiter
-rpc.jup.ag | 100 | Jupiter | Global
-
-# Orca
-api.mainnet-beta.orca.so | 100 | Orca | Global
-
-# Marinade
-rpc.marinade.finance | 100 | Marinade | Global
-
-# Drift
-solana-rpc.drift.trade | 100 | Drift | Global
-
-# Mango
-api.mngo.cloud | 100 | Mango | Global
-
-# Metaplex
-api.metaplex.solana.com | 100 | Metaplex | Global
-
-# Phantom
-solana-mainnet.phantom.tech | 100 | Phantom | Global
-
-# Exodus
-solana.exodus.com | 100 | Exodus | Global
-
-# Slope
-mainnet.rpcpool.com | 100 | Slope | Global'
-
     while true; do
         echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
         echo "1. 导入节点列表"
@@ -550,6 +459,103 @@ mainnet.rpcpool.com | 100 | Slope | Global'
 # 生成RPC处理脚本
 generate_rpc_script() {
     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import json
+import logging
+import requests
+import urllib3
+from concurrent.futures import ThreadPoolExecutor
+
+# 禁用SSL警告
+urllib3.disable_warnings()
+
+class RPCNode:
+    def __init__(self, ip, provider="Unknown", location="Unknown"):
+        self.ip = ip
+        self.endpoint = None
+        self.provider = provider
+        self.location = location
+        self.reported_latency = 0
+        self.real_latency = 0
+        self.health_score = 0
+        self.is_working = False
+        self.version = None
+        self.slot = None
+        self.vote_accounts = None
+        self.cluster_nodes = None
+        self.error_count = 0
+        self.success_count = 0
+        self.last_checked = 0
+    
+    def to_dict(self):
+        return {
+            "ip": self.ip,
+            "endpoint": self.endpoint,
+            "provider": self.provider,
+            "location": self.location,
+            "latency": self.real_latency,
+            "health": self.health_score,
+            "version": self.version,
+            "last_checked": self.last_checked
+        }
+
+class RPCManager:
+    def __init__(self):
+        self.history_file = os.path.expanduser("~/.solana_pump/rpc_history.json")
+        self.node_history = self.load_history()
+    
+    def load_history(self):
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r') as f:
+                    return json.load(f)
+        except:
+            pass
+        return {}
+    
+    def save_history(self):
+        try:
+            with open(self.history_file, 'w') as f:
+                json.dump(self.node_history, f, indent=4)
+        except:
+            pass
+    
+    def update_node_history(self, node):
+        if node.ip not in self.node_history:
+            self.node_history[node.ip] = {
+                "first_seen": time.time(),
+                "checks": 0,
+                "successes": 0,
+                "total_latency": 0,
+                "min_latency": float('inf'),
+                "max_latency": 0
+            }
+        
+        history = self.node_history[node.ip]
+        history["checks"] += 1
+        if node.is_working:
+            history["successes"] += 1
+            history["total_latency"] += node.real_latency
+            history["min_latency"] = min(history["min_latency"], node.real_latency)
+            history["max_latency"] = max(history["max_latency"], node.real_latency)
+        history["last_check"] = time.time()
+    
+    def get_node_stats(self, node):
+        if node.ip not in self.node_history:
+            return None
+        
+        history = self.node_history[node.ip]
+        return {
+            "uptime": history["successes"] / history["checks"] if history["checks"] > 0 else 0,
+            "avg_latency": history["total_latency"] / history["successes"] if history["successes"] > 0 else 0,
+            "min_latency": history["min_latency"] if history["min_latency"] != float('inf') else 0,
+            "max_latency": history["max_latency"],
+            "age_days": (time.time() - history["first_seen"]) / (24 * 3600)
+        }
+
 def test_node_health(node, timeout=3):
     """测试节点健康状态"""
     if not node.endpoint:
@@ -661,6 +667,39 @@ def test_nodes_batch(nodes, max_workers=20):
     
     return working_nodes
 
+def scan_network_nodes():
+    """扫描网络节点"""
+    try:
+        # 使用solana-cli获取网络节点列表
+        import subprocess
+        result = subprocess.run(['solana', 'gossip'], capture_output=True, text=True)
+        
+        nodes = []
+        for line in result.stdout.split('\n'):
+            if '|' in line and 'ip=' in line:
+                try:
+                    parts = line.split('|')
+                    ip_part = [p for p in parts if 'ip=' in p][0]
+                    ip = ip_part.split('=')[1].strip()
+                    
+                    # 提取版本信息
+                    version = "Unknown"
+                    for part in parts:
+                        if 'version=' in part:
+                            version = part.split('=')[1].strip()
+                    
+                    nodes.append(RPCNode(
+                        ip=ip,
+                        provider=f"Validator ({version})",
+                        location="Network Node"
+                    ))
+                except:
+                    continue
+        
+        return nodes
+    except:
+        return []
+
 def process_rpc_list(input_file, output_file, scan_network=False):
     """处理RPC节点列表"""
     nodes = []
@@ -757,9 +796,9 @@ EOF
     echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
 }
 
-# 生成Python监控脚本
-generate_python_script() {
-    cat > $PY_SCRIPT << 'EOF'
+#===========================================
+# Python监控核心模块 (pump_monitor.py)
+#===========================================
 #!/usr/bin/env python3
 import os
 import sys
@@ -922,16 +961,17 @@ class TokenMonitor:
             "holder_concentration": 0,
             "verified": False
         }
-            def analyze_creator_history(self, creator):
-        """分析创建者历史"""
+    def analyze_creator_history(self, creator):
+        """分析创建者历史记录"""
+        # 检查缓存
+        if creator in self.address_cache:
+            cache_data = self.address_cache[creator]
+            if time.time() - cache_data['timestamp'] < self.cache_expire:
+                return cache_data['history']
+        
         try:
-            if creator in self.address_cache:
-                cache_data = self.address_cache[creator]
-                if time.time() - cache_data['timestamp'] < self.cache_expire:
-                    return cache_data['history']
-
             headers = {"X-API-KEY": self.get_next_api_key()}
-            url = f"https://public-api.birdeye.so/public/address_activity?address={creator}"
+            url = f"https://public-api.birdeye.so/public/address_nft_mints?address={creator}"
             resp = requests.get(url, headers=headers, timeout=5)
             data = resp.json()
             
@@ -1090,8 +1130,7 @@ class TokenMonitor:
                 "high_value_relations": [],
                 "risk_score": 0
             }
-
-    def _analyze_cosigners(self, address, creator):
+                def _analyze_cosigners(self, address, creator):
         """分析共同签名者（辅助函数）"""
         try:
             tx_url = f"https://public-api.solscan.io/account/transactions?account={address}"
@@ -1112,7 +1151,7 @@ class TokenMonitor:
             return []
 
     def calculate_risk_score(self, relations, wallet_age):
-        """计算风险分数（优化版）"""
+        """计算风险分数"""
         score = 0
         
         # 1. 钱包年龄评分 (0-25分)
@@ -1167,8 +1206,9 @@ class TokenMonitor:
             score += 5
         
         return min(score, 100)  # 最高100分
+
     def format_alert_message(self, data):
-        """格式化警报消息（优化版）"""
+        """格式化警报消息"""
         creator = data["creator"]
         mint = data["mint"]
         token_info = data["token_info"]
@@ -1221,8 +1261,7 @@ class TokenMonitor:
     创建时间: {creation_time.strftime('%Y-%m-%d %H:%M:%S')}
     最高市值: ${token['max_market_cap']:,.2f}
     当前市值: ${token['current_market_cap']:,.2f}"""
-
-        # 添加关联的关注地址信息
+            # 添加关联的关注地址信息
         if relations['watch_hits']:
             msg += "\n\n⚠️ 发现关联的关注地址:"
             for hit in relations['watch_hits']:
@@ -1365,13 +1404,268 @@ class TokenMonitor:
 if __name__ == "__main__":
     monitor = TokenMonitor()
     monitor.monitor()
-EOF
+#===========================================
+# RPC节点处理模块 (process_rpc.py)
+#===========================================
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import time
+import socket
+import requests
+import concurrent.futures
+from typing import List, Dict, Optional
 
-    chmod +x $PY_SCRIPT
-}
+class RPCNode:
+    def __init__(self, ip: str, provider: str = "Unknown", location: str = "Unknown"):
+        self.ip = ip.strip()
+        if not self.ip.startswith(('http://', 'https://')):
+            self.ip = f"https://{self.ip}"
+        self.provider = provider.strip()
+        self.location = location.strip()
+        self.reported_latency = 0
+        self.real_latency = float('inf')
+        self.health_score = 0
+        self.version = None
+        self.last_check = 0
+        self.error_count = 0
+        self.success_count = 0
 
+    def to_dict(self) -> Dict:
+        return {
+            "endpoint": self.ip,
+            "provider": self.provider,
+            "location": self.location,
+            "latency": self.real_latency,
+            "health": self.health_score,
+            "version": self.version
+        }
 
+    def test_health(self) -> bool:
+        """测试节点健康状态"""
+        try:
+            start_time = time.time()
+            
+            # 1. 基本连接测试
+            resp = requests.post(
+                self.ip,
+                json={"jsonrpc":"2.0","id":1,"method":"getHealth"},
+                timeout=5,
+                verify=False
+            )
+            
+            if resp.status_code != 200:
+                return False
+            
+            # 2. 获取版本信息
+            version_resp = requests.post(
+                self.ip,
+                json={"jsonrpc":"2.0","id":1,"method":"getVersion"},
+                timeout=5,
+                verify=False
+            )
+            
+            if version_resp.status_code == 200:
+                version_data = version_resp.json()
+                if "result" in version_data:
+                    self.version = f"{version_data['result']['solana-core']}"
+            
+            # 3. 获取最新区块
+            slot_resp = requests.post(
+                self.ip,
+                json={"jsonrpc":"2.0","id":1,"method":"getSlot"},
+                timeout=5,
+                verify=False
+            )
+            
+            if slot_resp.status_code != 200:
+                return False
+            
+            # 4. 计算延迟和健康分
+            self.real_latency = (time.time() - start_time) * 1000  # 转换为毫秒
+            self.success_count += 1
+            self.last_check = time.time()
+            
+            # 健康分计算:
+            # - 基础分50分
+            # - 延迟评分30分 (延迟越低分越高)
+            # - 稳定性评分20分 (成功率)
+            base_score = 50
+            latency_score = max(0, 30 - (self.real_latency / 50))  # 每50ms扣1分
+            stability_score = 20 * (self.success_count / (self.success_count + self.error_count))
+            
+            self.health_score = min(100, base_score + latency_score + stability_score)
+            
+            return True
+            
+        except Exception as e:
+            self.error_count += 1
+            self.real_latency = float('inf')
+            self.health_score = max(0, self.health_score - 10)  # 每次错误扣10分
+            return False
 
+def test_nodes_batch(nodes: List[RPCNode], max_workers: int = 10) -> List[RPCNode]:
+    """批量测试节点"""
+    working_nodes = []
+    
+    print(f"\n\033[33m>>> 正在测试 {len(nodes)} 个节点...\033[0m")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_node = {executor.submit(node.test_health): node for node in nodes}
+        
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_node), 1):
+            node = future_to_node[future]
+            try:
+                if future.result():
+                    working_nodes.append(node)
+                    status = f"\033[32m可用\033[0m"
+                else:
+                    status = f"\033[31m失败\033[0m"
+            except Exception:
+                status = f"\033[31m错误\033[0m"
+            
+            print(f"\r测试进度: {i}/{len(nodes)} - {node.ip} [{status}]", end='')
+    
+    print("\n")
+    return working_nodes
+
+def scan_network_nodes() -> List[RPCNode]:
+    """扫描网络节点"""
+    try:
+        print("\n\033[33m>>> 正在扫描网络节点...\033[0m")
+        
+        # 获取验证者列表
+        validators = requests.get(
+            "https://api.mainnet-beta.solana.com",
+            json={
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"getClusterNodes"
+            },
+            timeout=10
+        ).json()
+        
+        nodes = []
+        if "result" in validators:
+            for v in validators["result"]:
+                if "rpc" in v and v["rpc"]:
+                    ip = v["rpc"]
+                    version = v.get("version", "Unknown")
+                    
+                    # 尝试解析IP地址
+                    try:
+                        if "://" in ip:
+                            host = ip.split("://")[1].split(":")[0]
+                        else:
+                            host = ip.split(":")[0]
+                            
+                        socket.gethostbyname(host)
+                        nodes.append(RPCNode(
+                            ip=ip,
+                            provider=f"Validator ({version})",
+                            location="Network Node"
+                        ))
+                    except:
+                        continue
+        
+        return nodes
+    except:
+        return []
+
+def process_rpc_list(input_file: str, output_file: str, scan_network: bool = False):
+    """处理RPC节点列表"""
+    nodes = []
+    processed_ips = set()
+    
+    # 读取文件中的节点
+    if os.path.exists(input_file):
+        print(f"\n\033[33m>>> 正在读取节点列表: {input_file}\033[0m")
+        with open(input_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                try:
+                    if '|' in line:
+                        parts = [p.strip() for p in line.split('|')]
+                        if len(parts) >= 2:
+                            ip = parts[0]
+                            base_ip = ip.split(':')[0].replace('https://', '').replace('http://', '')
+                            
+                            if base_ip not in processed_ips:
+                                processed_ips.add(base_ip)
+                                node = RPCNode(
+                                    ip=ip,
+                                    provider=parts[2] if len(parts) > 2 else 'Unknown',
+                                    location=parts[3] if len(parts) > 3 else 'Unknown'
+                                )
+                                try:
+                                    node.reported_latency = float(parts[1].replace('ms', ''))
+                                except:
+                                    pass
+                                nodes.append(node)
+                except Exception as e:
+                    print(f"\033[31m处理节点失败: {line} ({str(e)})\033[0m")
+                    continue
+    
+    # 扫描网络节点
+    if scan_network:
+        network_nodes = scan_network_nodes()
+        for node in network_nodes:
+            if node.ip.split(':')[0] not in processed_ips:
+                nodes.append(node)
+    
+    if not nodes:
+        print("\n\033[31m错误: 没有找到可用的节点\033[0m")
+        return
+    
+    # 测试节点
+    working_nodes = test_nodes_batch(nodes)
+    
+    # 按延迟和健康分排序
+    working_nodes.sort(key=lambda x: (100 - x.health_score, x.real_latency))
+    
+    # 保存结果
+    if working_nodes:
+        print(f"\n\033[33m>>> 正在保存 {len(working_nodes)} 个有效节点到 {output_file}\033[0m")
+        with open(output_file, 'w') as f:
+            for node in working_nodes:
+                f.write(json.dumps(node.to_dict()) + '\n')
+        
+        print(f"\n\033[32m✓ 处理完成")
+        print(f"总节点数: {len(nodes)}")
+        print(f"有效节点数: {len(working_nodes)}")
+        print(f"可用率: {len(working_nodes)/len(nodes)*100:.1f}%")
+        
+        # 打印最佳节点
+        print('\n最佳RPC节点 (前10个):')
+        print('=' * 120)
+        print(f"{'节点地址':50} | {'延迟':8} | {'健康分':8} | {'版本':10} | {'供应商':15} | {'位置':20}")
+        print('-' * 120)
+        
+        for node in working_nodes[:10]:
+            print(f"{node.ip:50} | {node.real_latency:6.1f}ms | {node.health_score:6.0f}/100 | {node.version or 'Unknown':10} | {node.provider:15} | {node.location:20}")
+    else:
+        print("\n\033[31m错误: 没有找到可用的节点\033[0m")
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print("Usage: python3 process_rpc.py input_file output_file [--scan-network]")
+        sys.exit(1)
+    
+    try:
+        scan_network = '--scan-network' in sys.argv
+        input_file = sys.argv[1]
+        output_file = sys.argv[2]
+        process_rpc_list(input_file, output_file, scan_network)
+    except Exception as e:
+        print(f"\n\033[31m错误: {e}\033[0m")
+        sys.exit(1)
+#===========================================
+# 主程序和菜单模块
+#===========================================
 
 # 前后台控制
 toggle_foreground() {
@@ -1412,32 +1706,13 @@ start_monitor() {
     echo -e "${GREEN}>>> 使用'3'选项可切换前台显示${RESET}"
 }
 
-# 依赖安装
-install_dependencies() {
-    echo -e "${YELLOW}>>> 检查系统依赖...${RESET}"
-    
-    if command -v apt &>/dev/null; then
-        PKG_MGR="apt"
-        sudo apt update
-    elif command -v yum &>/dev/null; then
-        PKG_MGR="yum"
-    else
-        echo -e "${RED}✗ 不支持的系统!${RESET}"
-        exit 1
-    fi
-
-    sudo $PKG_MGR install -y python3 python3-pip jq
-    pip3 install requests wcferry
-
-    echo -e "${GREEN}✓ 依赖安装完成${RESET}"
-}
-
 # 关注地址管理
 manage_watch_addresses() {
     WATCH_FILE="$HOME/.solana_pump/watch_addresses.json"
     
     # 确保文件存在
     if [ ! -f "$WATCH_FILE" ]; then
+        mkdir -p "$HOME/.solana_pump"
         echo '{"addresses":[]}' > "$WATCH_FILE"
     fi
     
@@ -1536,6 +1811,7 @@ manage_watch_addresses() {
     done
 }
 
+# 主菜单
 show_menu() {
     echo -e "\n${BLUE}Solana Pump监控系统 v4.0${RESET}"
     echo "1. 启动监控"
@@ -1543,12 +1819,12 @@ show_menu() {
     echo "3. 切换前台显示"
     echo "4. RPC节点管理"
     echo "5. 通知设置"
-    echo "6. 关注地址管理"  # 新增
+    echo "6. 关注地址管理"
     echo "7. 退出"
     echo -n "请选择 [1-7]: "
 }
 
-# 主程序
+# 主程序入口
 case $1 in
     "--daemon")
         generate_python_script
@@ -1582,4 +1858,5 @@ case $1 in
             esac
         done
         ;;
-esac                
+esac     
+      
