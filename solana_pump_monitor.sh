@@ -1886,23 +1886,6 @@ EOF
     echo -e "${GREEN}✓ 监控脚本已生成${RESET}"
 }
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('monitor.log'),
-            logging.StreamHandler()
-        ]
-    )
-    monitor = TokenMonitor()
-    monitor.monitor()
-EOF
-
-    chmod +x "$PY_SCRIPT"
-    echo -e "${GREEN}✓ 监控脚本已生成${RESET}"
-}
-
 # 前后台控制
 toggle_foreground() {
     if [ -f "$PIDFILE" ]; then
