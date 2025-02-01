@@ -528,9 +528,6 @@ manage_watch_addresses() {
 #===========================================
 # RPC节点处理模块
 #===========================================
-#===========================================
-# RPC节点处理模块
-#===========================================
 # 全局配置
 RPC_DIR="$HOME/.solana_pump"
 RPC_FILE="$RPC_DIR/rpc.txt"
@@ -829,13 +826,19 @@ from concurrent.futures import ThreadPoolExecutor
 
 class TokenMonitor:
     def __init__(self):
+        # 基础配置
         self.config_file = os.path.expanduser("~/.solana_pump.cfg")
         self.rpc_file = os.path.expanduser("~/.solana_pump.rpc")
         self.watch_dir = os.path.expanduser("~/.solana_pump")
         self.watch_file = os.path.join(self.watch_dir, "watch_addresses.json")
-        self.watch_addresses = {}
-        self.address_cache = {}
-        self.wcf = None
+        
+        # 创建必要的目录和文件
+        os.makedirs(self.watch_dir, exist_ok=True)
+        
+        # 初始化关注地址文件
+        if not os.path.exists(self.watch_file):
+            with open(self.watch_file, 'w') as f:
+                json.dump({"addresses": {}}, f)  # 改为字典格式，方便更新
         
         # 加载配置
         try:
@@ -845,69 +848,128 @@ class TokenMonitor:
             logging.error(f"加载配置失败: {e}")
             self.config = {"api_keys": [], "serverchan": {"keys": []}, "wcf": {"groups": []}}
         
-        # 加载关注地址
+        self.api_keys = self.config.get('api_keys', [])
+        self.current_key = 0
+        self.request_counts = {}
+        self.last_reset = {}
+        self.wcf = None
+        self.watch_addresses = self.load_watch_addresses()
+        self.init_wcf()
+        
+        # 初始化API密钥计数器
+        for key in self.api_keys:
+            if key.strip():
+                self.request_counts[key] = 0
+                self.last_reset[key] = time.time()
+
+        # 创建线程池
+        self.executor = ThreadPoolExecutor(max_workers=5)
+        
+        # 缓存已分析的地址
+        self.address_cache = {}
+        self.cache_expire = 3600  # 缓存1小时过期
+        
+        # 成功项目阈值设置
+        self.SUCCESS_MARKET_CAP = 1_000_000  # 100万美元市值
+        self.SUCCESS_HOLDERS = 1000  # 1000个持有人
+
+    def get_best_rpc(self):
+        """获取最佳RPC节点"""
         try:
-            if os.path.exists(self.watch_file):
-                with open(self.watch_file) as f:
-                    data = json.load(f)
-                    self.watch_addresses = {addr["address"]: addr["note"] 
-                                         for addr in data.get("addresses", [])}
+            with open(self.rpc_file) as f:
+                rpc_url = f.read().strip()
+                if rpc_url.startswith('https://'):
+                    return rpc_url
+        except Exception as e:
+            logging.error(f"读取RPC文件失败: {e}")
+        return "https://api.mainnet-beta.solana.com"
+
+    def load_watch_addresses(self):
+        """加载关注地址"""
+        try:
+            with open(self.watch_file) as f:
+                data = json.load(f)
+                return data.get("addresses", {})
         except Exception as e:
             logging.error(f"加载关注地址失败: {e}")
+            return {}
+
+    def save_watch_addresses(self):
+        """保存关注地址"""
+        try:
+            with open(self.watch_file, 'w') as f:
+                json.dump({"addresses": self.watch_addresses}, f, indent=4)
+        except Exception as e:
+            logging.error(f"保存关注地址失败: {e}")
+
+    def update_watch_address(self, address, info):
+        """更新关注地址
+        address: 地址
+        info: {
+            "success_count": 成功项目数,
+            "total_count": 总项目数,
+            "last_success": 最后一个成功项目信息,
+            "update_time": 更新时间
+        }
+        """
+        self.watch_addresses[address] = info
+        self.save_watch_addresses()
+
+    def check_project_success(self, token_info):
+        """检查项目是否成功"""
+        return (token_info["market_cap"] >= self.SUCCESS_MARKET_CAP or 
+                token_info["holder_count"] >= self.SUCCESS_HOLDERS)
+
+    def get_next_api_key(self):
+        """获取下一个可用的API密钥"""
+        if not self.api_keys:
+            raise Exception("没有配置API密钥")
         
-        # 初始化WeChatFerry
+        current_time = time.time()
+        for _ in range(len(self.api_keys)):
+            key = self.api_keys[self.current_key]
+            
+            # 检查是否需要重置计数器
+            if current_time - self.last_reset.get(key, 0) > 3600:
+                self.request_counts[key] = 0
+                self.last_reset[key] = current_time
+            
+            # 如果当前密钥未达到限制
+            if self.request_counts.get(key, 0) < 10:  # 每小时10次限制
+                self.request_counts[key] = self.request_counts.get(key, 0) + 1
+                return key
+            
+            # 切换到下一个密钥
+            self.current_key = (self.current_key + 1) % len(self.api_keys)
+        
+        raise Exception("所有API密钥已达到限制")
+
+    def init_wcf(self):
+        """初始化WeChatFerry"""
         if self.config["wcf"]["groups"]:
             try:
                 self.wcf = Wcf()
             except Exception as e:
-                logging.error(f"初始化WeChatFerry失败: {e}")
-
-def get_best_rpc(self):
-    """获取最佳RPC节点"""
-    try:
-        with open(self.rpc_file) as f:
-            rpc_url = f.read().strip()
-            if rpc_url.startswith('https://'):
-                logging.info(f"使用RPC节点: {rpc_url}")
-                return rpc_url
-    except Exception as e:
-        logging.error(f"读取RPC文件失败: {e}")
-    
-    # 如果读取失败，使用默认RPC
-    default_rpc = "https://api.mainnet-beta.solana.com"
-    logging.info(f"使用默认RPC节点: {default_rpc}")
-    return default_rpc
-
-    def get_next_api_key(self):
-        """轮询获取下一个API密钥"""
-        if not hasattr(self, '_current_key_index'):
-            self._current_key_index = 0
-        elif not self.config["api_keys"]:
-            return None
-        
-        key = self.config["api_keys"][self._current_key_index]
-        self._current_key_index = (self._current_key_index + 1) % len(self.config["api_keys"])
-        return key
-
-    def fetch_token_info(self, mint):
+                logging.error(f"WeChatFerry初始化失败: {e}")
+                    def fetch_token_info(self, mint):
         """获取代币信息"""
         try:
             headers = {"X-API-KEY": self.get_next_api_key()}
-            url = f"https://public-api.birdeye.so/public/token_metadata?address={mint}"
+            url = f"https://public-api.birdeye.so/public/token?address={mint}"
             resp = requests.get(url, headers=headers, timeout=5)
+            data = resp.json()
             
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("success"):
-                    token = data["data"]
-                    return {
-                        "supply": float(token.get("supply", 0)),
-                        "price": float(token.get("price", 0)),
-                        "market_cap": float(token.get("marketCap", 0)),
-                        "liquidity": float(token.get("liquidity", 0)),
-                        "holder_count": int(token.get("holderCount", 0)),
-                        "holder_concentration": float(token.get("holderConcentration", 0))
-                    }
+            if data.get("success"):
+                token = data["data"]
+                return {
+                    "supply": float(token.get("supply", 0)),
+                    "price": float(token.get("price", 0)),
+                    "market_cap": float(token.get("marketCap", 0)),
+                    "liquidity": float(token.get("liquidity", 0)),
+                    "holder_count": int(token.get("holderCount", 0)),
+                    "holder_concentration": float(token.get("holder_concentration", 0)),
+                    "verified": bool(token.get("verified", False))
+                }
         except Exception as e:
             logging.error(f"获取代币信息失败: {e}")
         
@@ -917,52 +979,74 @@ def get_best_rpc(self):
             "market_cap": 0,
             "liquidity": 0,
             "holder_count": 0,
-            "holder_concentration": 0
+            "holder_concentration": 0,
+            "verified": False
         }
 
     def analyze_creator_history(self, creator):
         """分析创建者历史记录"""
         # 检查缓存
         if creator in self.address_cache:
-            cache = self.address_cache[creator]
-            if time.time() - cache['timestamp'] < 3600:  # 1小时缓存
-                return cache['history']
+            cache_data = self.address_cache[creator]
+            if time.time() - cache_data['timestamp'] < self.cache_expire:
+                return cache_data['history']
         
         try:
             headers = {"X-API-KEY": self.get_next_api_key()}
-            url = f"https://public-api.birdeye.so/public/address_nft?address={creator}"
+            url = f"https://public-api.birdeye.so/public/address_nft_mints?address={creator}"
             resp = requests.get(url, headers=headers, timeout=5)
+            data = resp.json()
             
-            history = []
-            if resp.status_code == 200:
-                data = resp.json()
-                if not data.get("success"):
-                    return []
+            if data.get("success"):
+                history = []
+                success_count = 0
+                total_count = 0
+                last_success = None
                 
                 for tx in data["data"]:
-                    token_info = self.fetch_token_info(tx["mint"])
-                    max_market_cap = 0
-                    
-                    try:
-                        history_url = f"https://public-api.birdeye.so/public/token_price_history?address={tx['mint']}"
-                        history_resp = requests.get(history_url, headers=headers, timeout=5)
-                        if history_resp.status_code == 200:
-                            price_history = history_resp.json().get("data", [])
-                            if price_history:
-                                max_price = max(float(p.get("value", 0)) for p in price_history)
-                                max_market_cap = max_price * token_info["supply"]
-                    except:
-                        pass
+                    if "mint" in tx:
+                        token_info = self.fetch_token_info(tx["mint"])
+                        total_count += 1
+                        
+                        # 获取历史最高市值
+                        max_market_cap = 0
+                        try:
+                            history_url = f"https://public-api.birdeye.so/public/token_price_history?address={tx['mint']}"
+                            history_resp = requests.get(history_url, headers=headers, timeout=5)
+                            if history_resp.status_code == 200:
+                                price_history = history_resp.json().get("data", [])
+                                if price_history:
+                                    max_price = max(float(p.get("value", 0)) for p in price_history)
+                                    max_market_cap = max_price * token_info["supply"]
+                        except:
+                            pass
 
-                    history.append({
-                        "mint": tx["mint"],
-                        "timestamp": tx["timestamp"],
-                        "current_market_cap": token_info["market_cap"],
-                        "max_market_cap": max_market_cap,
-                        "liquidity": token_info["liquidity"],
-                        "holder_count": token_info["holder_count"],
-                        "holder_concentration": token_info["holder_concentration"],
-                        "status": "活跃" if token_info["market_cap"] > 0 else "已退出"
+                        token_data = {
+                            "mint": tx["mint"],
+                            "timestamp": tx["timestamp"],
+                            "current_market_cap": token_info["market_cap"],
+                            "max_market_cap": max_market_cap,
+                            "liquidity": token_info["liquidity"],
+                            "holder_count": token_info["holder_count"],
+                            "holder_concentration": token_info["holder_concentration"],
+                            "status": "活跃" if token_info["market_cap"] > 0 else "已退出"
+                        }
+                        
+                        history.append(token_data)
+                        
+                        # 检查是否是成功项目
+                        if self.check_project_success(token_info):
+                            success_count += 1
+                            if not last_success or token_data["timestamp"] > last_success["timestamp"]:
+                                last_success = token_data
+
+                # 更新关注地址
+                if total_count > 0:
+                    self.update_watch_address(creator, {
+                        "success_count": success_count,
+                        "total_count": total_count,
+                        "last_success": last_success,
+                        "update_time": int(time.time())
                     })
 
                 # 缓存结果
@@ -1002,82 +1086,46 @@ def get_best_rpc(self):
                         if tx["from"] in self.watch_addresses:
                             watch_hits.append({
                                 'address': tx["from"],
-                                'note': self.watch_addresses[tx["from"]],
+                                'info': self.watch_addresses[tx["from"]],
                                 'type': 'transfer_from',
                                 'amount': tx.get("amount", 0),
                                 'timestamp': tx["timestamp"]
                             })
-                            
+                    
                     if tx.get("to") and tx["to"] != creator:
                         related_addresses.add(tx["to"])
                         if tx["to"] in self.watch_addresses:
                             watch_hits.append({
                                 'address': tx["to"],
-                                'note': self.watch_addresses[tx["to"]],
+                                'info': self.watch_addresses[tx["to"]],
                                 'type': 'transfer_to',
                                 'amount': tx.get("amount", 0),
                                 'timestamp': tx["timestamp"]
                             })
-                        
-                    # 特别关注大额转账
-                    if tx.get("amount", 0) > 1:  # 1 SOL以上的转账
-                        relations.append({
-                            "address": tx["to"] if tx["from"] == creator else tx["from"],
-                            "type": "transfer",
-                            "amount": tx["amount"],
-                            "timestamp": tx["timestamp"]
-                        })
                 
                 # 计算钱包年龄（天）
                 wallet_age = (time.time() - first_tx_time) / (24 * 3600) if first_tx_time != float('inf') else 0
             
-            # 2. 深度分析关联地址
+            # 2. 分析关联地址
             for address in related_addresses:
-                # 分析代币创建历史
-                token_history = self.analyze_creator_history(address)
-                if token_history:
-                    # 找出高价值代币（最高市值超过1亿美元）
-                    high_value_tokens = [t for t in token_history 
-                                       if t["max_market_cap"] > 100_000_000]
-                    
-                    if high_value_tokens:
+                history = self.analyze_creator_history(address)
+                if history:
+                    success_count = sum(1 for t in history if self.check_project_success(t))
+                    if success_count > 0:
                         high_value_relations.append({
                             "address": address,
-                            "tokens": high_value_tokens,
-                            "total_created": len(token_history)
+                            "success_count": success_count,
+                            "total_count": len(history),
+                            "history": history[:3]  # 只保留最近3个项目
                         })
-                    
-                    relations.append({
-                        "address": address,
-                        "type": "token_creator",
-                        "tokens": len(token_history),
-                        "success_rate": sum(1 for t in token_history if t["status"] == "活跃") / len(token_history),
-                        "high_value_tokens": len(high_value_tokens)
-                    })
-            
-            # 3. 分析共同签名者
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = []
-                for address in related_addresses:
-                    futures.append(executor.submit(self._analyze_cosigners, 
-                                                address, creator))
-                
-                for future in futures:
-                    try:
-                        result = future.result()
-                        if result:
-                            relations.extend(result)
-                    except:
-                        continue
             
             return {
                 "wallet_age": wallet_age,
                 "is_new_wallet": wallet_age < 7,  # 小于7天视为新钱包
                 "related_addresses": list(related_addresses),
-                "relations": relations,
                 "watch_hits": watch_hits,
                 "high_value_relations": high_value_relations,
-                "risk_score": self.calculate_risk_score(relations, wallet_age)
+                "risk_score": self.calculate_risk_score(wallet_age, len(related_addresses), high_value_relations)
             }
         except Exception as e:
             logging.error(f"分析地址关联性失败: {e}")
@@ -1085,89 +1133,43 @@ def get_best_rpc(self):
                 "wallet_age": 0,
                 "is_new_wallet": True,
                 "related_addresses": [],
-                "relations": [],
                 "watch_hits": [],
                 "high_value_relations": [],
-                "risk_score": 0
+                "risk_score": 100  # 出错时设置最高风险
             }
 
-    def _analyze_cosigners(self, address, creator):
-        """分析共同签名者（辅助函数）"""
-        try:
-            tx_url = f"https://public-api.solscan.io/account/transactions?account={address}"
-            tx_resp = requests.get(tx_url, timeout=5)
-            tx_data = tx_resp.json()
-            
-            cosigner_relations = []
-            for tx in tx_data[:100]:  # 只看最近100笔交易
-                if creator in tx.get("signatures", []):
-                    cosigner_relations.append({
-                        "address": address,
-                        "type": "co_signer",
-                        "tx_hash": tx["signature"],
-                        "timestamp": tx["blockTime"]
-                    })
-            return cosigner_relations
-        except:
-            return []
-
-    def calculate_risk_score(self, relations, wallet_age):
+    def calculate_risk_score(self, wallet_age, related_count, high_value_relations):
         """计算风险分数"""
         score = 0
         
-        # 1. 钱包年龄评分 (0-25分)
+        # 1. 钱包年龄评分 (0-30分)
         if wallet_age < 1:  # 小于1天
-            score += 25
+            score += 30
         elif wallet_age < 7:  # 小于7天
-            score += 15
+            score += 20
         elif wallet_age < 30:  # 小于30天
-            score += 5
+            score += 10
         
-        # 2. 关联地址评分 (0-25分)
-        unique_addresses = len(set(r["address"] for r in relations))
-        if unique_addresses > 20:
-            score += 25
-        elif unique_addresses > 10:
-            score += 15
-        elif unique_addresses > 5:
-            score += 5
+        # 2. 关联地址评分 (0-30分)
+        if related_count < 5:
+            score += 30
+        elif related_count < 20:
+            score += 20
+        elif related_count < 50:
+            score += 10
         
-        # 3. 代币创建者分析 (0-25分)
-        token_creators = [r for r in relations if r["type"] == "token_creator"]
-        if token_creators:
-            # 计算平均成功率
-            avg_success = sum(t["success_rate"] for t in token_creators) / len(token_creators)
-            # 计算高价值代币数量
-            high_value_count = sum(t.get("high_value_tokens", 0) for t in token_creators)
-            
-            if avg_success < 0.2:  # 成功率低于20%
-                score += 25
-            elif avg_success < 0.4:  # 成功率低于40%
-                score += 15
-            elif avg_success < 0.6:  # 成功率低于60%
-                score += 5
-            
-            # 如果有高价值代币历史，降低风险分数
-            if high_value_count > 0:
-                score = max(0, score - 15)
-        
-        # 4. 交易行为评分 (0-25分)
-        large_transfers = [r for r in relations if r["type"] == "transfer" and r["amount"] > 10]
-        suspicious_patterns = len([t for t in large_transfers if any(
-            abs(t["timestamp"] - other["timestamp"]) < 300  # 5分钟内
-            for other in large_transfers
-            if t != other
-        )])
-        
-        if suspicious_patterns > 5:
-            score += 25
-        elif suspicious_patterns > 2:
-            score += 15
-        elif suspicious_patterns > 0:
-            score += 5
+        # 3. 高价值关联评分 (0-40分)
+        success_relations = len(high_value_relations)
+        if success_relations == 0:
+            score += 40
+        elif success_relations < 2:
+            score += 30
+        elif success_relations < 5:
+            score += 20
+        else:
+            score += 10
         
         return min(score, 100)  # 最高100分
-
     def format_alert_message(self, data):
         """格式化警报消息"""
         creator = data["creator"]
@@ -1196,7 +1198,13 @@ def get_best_rpc(self):
 
         # 添加关注地址信息
         if creator in self.watch_addresses:
-            msg += f"\n\n⭐ 重点关注地址！\n• 备注: {self.watch_addresses[creator]}"
+            info = self.watch_addresses[creator]
+            msg += f"""
+
+⭐ 重点关注地址！
+• 成功项目: {info['success_count']}/{info['total_count']}
+• 上次成功: {datetime.fromtimestamp(info['last_success']['timestamp']).strftime('%Y-%m-%d')}
+• 最高市值: ${info['last_success']['max_market_cap']:,.2f}"""
 
         # 添加风险评分
         risk_level = "高" if relations['risk_score'] >= 70 else "中" if relations['risk_score'] >= 40 else "低"
@@ -1213,10 +1221,9 @@ def get_best_rpc(self):
             for relation in relations['high_value_relations'][:3]:  # 只显示前3个
                 msg += f"""
 • 地址: {relation['address']}
-  - 创建代币总数: {relation['total_created']}
-  - 高价值代币数: {len(relation['tokens'])}"""
-                for token in relation['tokens'][:2]:  # 每个地址只显示前2个高价值代币
-                    creation_time = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
+  - 成功项目数: {relation['success_count']}/{relation['total_count']}"""
+                for token in relation['history']:  # 显示最近3个项目
+                    creation_time = datetime.fromtimestamp(token["timestamp"])
                     msg += f"""
   - {token['mint']}
     创建时间: {creation_time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1227,10 +1234,10 @@ def get_best_rpc(self):
         if relations['watch_hits']:
             msg += "\n\n⚠️ 发现关联的关注地址:"
             for hit in relations['watch_hits']:
-                timestamp = datetime.fromtimestamp(hit["timestamp"], tz=timezone(timedelta(hours=8)))
+                timestamp = datetime.fromtimestamp(hit["timestamp"])
                 msg += f"""
 • {hit['address']}
-  - 备注: {hit['note']}
+  - 成功项目: {hit['info']['success_count']}/{hit['info']['total_count']}
   - 关联类型: {hit['type']}
   - 交易金额: {hit['amount']:.2f} SOL
   - 交易时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"""
@@ -1248,7 +1255,7 @@ def get_best_rpc(self):
 
 最近代币记录:"""
             for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:3]:
-                timestamp = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
+                timestamp = datetime.fromtimestamp(token["timestamp"])
                 msg += f"""
 • {token['mint']}
   - 创建时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}
@@ -1262,7 +1269,7 @@ def get_best_rpc(self):
             msg += "\n• ⚠️ 新钱包创建，需谨慎对待"
         if relations['high_value_relations']:
             msg += "\n• 🌟 发现高价值关联方，可能是成功团队新项目"
-        if success_rate > 0.5:
+        if history and success_rate > 0.5:
             msg += "\n• ✅ 创建者历史表现良好"
         if relations['risk_score'] >= 70:
             msg += "\n• ❗ 高风险项目，建议谨慎"
