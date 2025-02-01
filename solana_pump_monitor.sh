@@ -691,7 +691,6 @@ def test_nodes_batch(nodes, max_workers=20):
                 node['real_latency'] = 999
                 node['is_working'] = False
                 print(f"\r处理: {i}/{total} | 节点: {node['ip']:50} | 延迟: 999.0ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
-
 def process_rpc_list(input_file, output_file, scan_network=False, batch_size=100):
     """分批处理RPC节点列表"""
     nodes = []
@@ -703,74 +702,55 @@ def process_rpc_list(input_file, output_file, scan_network=False, batch_size=100
     
     print(f"\n\033[33m>>> 开始处理RPC节点列表...\033[0m")
     
-    # 如果需要扫描网络节点
-    if scan_network:
-        network_nodes = scan_network_nodes()
-        if network_nodes:
-            nodes.extend(network_nodes)
-            for node in network_nodes:
-                processed_ips.add(node['ip'].split(':')[0])
-    
-    # 从文件读取已有节点
-    if os.path.exists(input_file):
-        with open(input_file, 'r') as f:
-            for line in f:
-                if not line.strip():
-                    continue
+    # 从文件读取节点
+    with open(input_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):  # 跳过空行和注释
+                continue
+                
+            total_lines += 1
+            if '|' in line:
+                valid_lines += 1
                 try:
-                    node = json.loads(line)
-                    base_ip = node['ip'].split(':')[0].replace('https://', '').replace('http://', '')
-                    if base_ip not in processed_ips:
-                        processed_ips.add(base_ip)
-                        nodes.append(node)
-                except:
+                    parts = [p.strip() for p in line.split('|')]
+                    if len(parts) >= 2:
+                        ip = parts[0].strip()
+                        base_ip = ip.split(':')[0].replace('https://', '').replace('http://', '')
+                        
+                        if base_ip not in processed_ips:
+                            processed_ips.add(base_ip)
+                            try:
+                                reported_latency = float(parts[1].replace('ms', ''))
+                            except:
+                                reported_latency = 999
+                            
+                            node = {
+                                'ip': ip,
+                                'reported_latency': reported_latency,
+                                'real_latency': 999,
+                                'is_working': False,
+                                'provider': parts[2].strip() if len(parts) > 2 else 'Unknown',
+                                'location': parts[3].strip() if len(parts) > 3 else 'Unknown'
+                            }
+                            batch.append(node)
+                            
+                            if len(batch) >= batch_size:
+                                print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
+                                test_nodes_batch(batch)
+                                nodes.extend(batch)
+                                batch = []
+                                batch_count += 1
+                except Exception as e:
+                    print(f"\033[31m处理节点失败: {line} ({str(e)})\033[0m")
                     continue
-    
-    # 处理新的节点列表
-    if os.path.exists(input_file + '.new'):
-        with open(input_file + '.new', 'r') as f:
-            for line in f:
-                if line.strip() and not line.strip().startswith('#'):
-                    total_lines += 1
-                    if '|' in line:
-                        valid_lines += 1
-                        try:
-                            parts = [p.strip() for p in line.split('|')]
-                            if len(parts) >= 4:
-                                ip = parts[0].strip()
-                                base_ip = ip.split(':')[0].replace('https://', '').replace('http://', '')
-                                
-                                if base_ip not in processed_ips:
-                                    processed_ips.add(base_ip)
-                                    try:
-                                        reported_latency = float(parts[1].replace('ms', ''))
-                                    except:
-                                        reported_latency = 999
-                                    
-                                    node = {
-                                        'ip': ip,
-                                        'reported_latency': reported_latency,
-                                        'real_latency': 999,
-                                        'is_working': False,
-                                        'provider': parts[2].strip(),
-                                        'location': parts[3].strip() if len(parts) > 3 else 'Unknown'
-                                    }
-                                    batch.append(node)
-                                    
-                                    if len(batch) >= batch_size:
-                                        print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
-                                        test_nodes_batch(batch)
-                                        nodes.extend(batch)
-                                        batch = []
-                                        batch_count += 1
-                        except Exception as e:
-                            continue
     
     # 处理最后一批
     if batch:
         print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
         test_nodes_batch(batch)
         nodes.extend(batch)
+
     
     # 重新测试所有节点
     print(f"\n\033[33m>>> 重新测试所有节点...\033[0m")
