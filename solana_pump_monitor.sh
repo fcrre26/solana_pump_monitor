@@ -476,22 +476,11 @@ EOF
         esac
     done
 }
-
 # 生成RPC处理脚本
 generate_rpc_script() {
+    mkdir -p "$HOME/.solana_pump"
     cat > "$HOME/.solana_pump/process_rpc.py" << 'EOFPYTHON'
 #!/usr/bin/env python3
-import os
-import sys
-import time
-import json
-import logging
-import requests
-import urllib3
-from concurrent.futures import ThreadPoolExecutor
-
-# 禁用SSL警告
-urllib3.disable_warnings()
 
 class RPCNode:
     def __init__(self, ip, provider="Unknown", location="Unknown"):
@@ -580,46 +569,31 @@ def test_node_health(node, timeout=3):
             node.error_count += 1
             continue
     
-    node.real_latency = (time.time() - start_time) * 1000
+    node.real_latency = (time.time() - start_time) * 1000  # 转换为毫秒
     node.health_score = health_score
-    node.is_working = health_score >= 60  # 至少通过3项检查
+    node.is_working = health_score > 60  # 健康分超过60认为节点正常
     node.last_checked = time.time()
     
-    if node.is_working:
-        node.success_count += 1
-    
-    return node
+    return node.is_working
 
-def test_nodes_batch(nodes, max_workers=20):
-    """并行测试节点"""
+def test_nodes_batch(nodes, batch_size=10):
+    """批量测试节点"""
     working_nodes = []
+    total = len(nodes)
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    print(f"\n\033[33m>>> 开始测试 {total} 个节点...\033[0m")
+    
+    with ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = []
-        total = len(nodes)
-        working_count = 0
-        
-        print(f"\n\033[33m>>> 开始测试 {total} 个节点...\033[0m")
-        print('=' * 120)
-        print(f"{'节点地址':50} | {'延迟':8} | {'健康分':8} | {'状态':6} | {'供应商':15} | {'位置':20}")
-        print('-' * 120)
-        
         for node in nodes:
-            future = executor.submit(test_node_health, node)
-            futures.append((node, future))
+            futures.append(executor.submit(test_node_health, node))
         
-        for i, (node, future) in enumerate(futures, 1):
+        for i, future in enumerate(futures):
             try:
-                tested_node = future.result()
-                if tested_node.is_working:
-                    working_count += 1
-                    working_nodes.append(tested_node)
-                
-                status = '\033[32m可用\033[0m' if tested_node.is_working else '\033[31m不可用\033[0m'
-                print(f"{tested_node.ip:50} | {tested_node.real_latency:6.1f}ms | {tested_node.health_score:6.0f}/100 | {status:8} | {tested_node.provider:15} | {tested_node.location:20}")
-                
-            except Exception as e:
-                print(f"\033[31m测试节点失败 {node.ip}: {str(e)}\033[0m")
+                if future.result():
+                    working_nodes.append(nodes[i])
+                print(f"\r进度: {i+1}/{total}", end="", flush=True)
+            except:
                 continue
     
     return working_nodes
@@ -627,7 +601,6 @@ def test_nodes_batch(nodes, max_workers=20):
 def scan_network_nodes():
     """扫描网络节点"""
     try:
-        # 使用solana-cli获取网络节点列表
         import subprocess
         result = subprocess.run(['solana', 'gossip'], capture_output=True, text=True)
         
@@ -639,7 +612,6 @@ def scan_network_nodes():
                     ip_part = [p for p in parts if 'ip=' in p][0]
                     ip = ip_part.split('=')[1].strip()
                     
-                    # 提取版本信息
                     version = "Unknown"
                     for part in parts:
                         if 'version=' in part:
@@ -662,7 +634,6 @@ def process_rpc_list(input_file, output_file, scan_network=False):
     nodes = []
     processed_ips = set()
     
-    # 读取文件中的节点
     if os.path.exists(input_file):
         print(f"\n\033[33m>>> 正在读取节点列表: {input_file}\033[0m")
         with open(input_file, 'r') as f:
@@ -694,7 +665,6 @@ def process_rpc_list(input_file, output_file, scan_network=False):
                     print(f"\033[31m处理节点失败: {line} ({str(e)})\033[0m")
                     continue
     
-    # 扫描网络节点
     if scan_network:
         network_nodes = scan_network_nodes()
         for node in network_nodes:
@@ -705,13 +675,9 @@ def process_rpc_list(input_file, output_file, scan_network=False):
         print("\n\033[31m错误: 没有找到可用的节点\033[0m")
         return
     
-    # 测试节点
     working_nodes = test_nodes_batch(nodes)
-    
-    # 按延迟和健康分排序
     working_nodes.sort(key=lambda x: (100 - x.health_score, x.real_latency))
     
-    # 保存结果
     if working_nodes:
         print(f"\n\033[33m>>> 正在保存 {len(working_nodes)} 个有效节点到 {output_file}\033[0m")
         with open(output_file, 'w') as f:
@@ -723,7 +689,6 @@ def process_rpc_list(input_file, output_file, scan_network=False):
         print(f"有效节点数: {len(working_nodes)}")
         print(f"可用率: {len(working_nodes)/len(nodes)*100:.1f}%")
         
-        # 打印最佳节点
         print('\n最佳RPC节点 (前10个):')
         print('=' * 120)
         print(f"{'节点地址':50} | {'延迟':8} | {'健康分':8} | {'版本':10} | {'供应商':15} | {'位置':20}")
@@ -752,6 +717,8 @@ EOFPYTHON
     chmod +x "$HOME/.solana_pump/process_rpc.py"
     echo -e "${GREEN}✓ RPC处理脚本已生成${RESET}"
 }
+
+
 
 #===========================================
 # Python监控核心模块
