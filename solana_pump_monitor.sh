@@ -328,21 +328,141 @@ EOF
 }
 
 # RPC节点管理
+# RPC节点管理
 manage_rpc() {
     ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
     mkdir -p "$HOME/.solana_pump"
     
+    # 默认公共RPC节点列表
+    DEFAULT_RPC_NODES='
+# Solana 官方公共RPC节点
+api.mainnet-beta.solana.com | 100 | Solana | Official Mainnet
+api.devnet.solana.com | 100 | Solana | Official Devnet
+
+# GenesysGo
+ssc-dao.genesysgo.net | 100 | GenesysGo | US
+free.rpcpool.com | 100 | GenesysGo | US
+
+# Ankr
+rpc.ankr.com/solana | 100 | Ankr | Global
+
+# Triton
+https://solana-api.projectserum.com | 100 | Project Serum | US
+
+# QuickNode
+solana-mainnet.rpc.extrnode.com | 100 | QuickNode | Global
+
+# Alchemy
+solana-mainnet.g.alchemy.com | 100 | Alchemy | Global
+
+# Figment
+solana-rpc.publicnode.com | 100 | Figment | Global
+
+# Helius
+rpc.helius.xyz | 100 | Helius | US
+
+# RunNode
+mainnet.rpcpool.com | 100 | RunNode | Global
+
+# Serum
+solana-api.projectserum.com | 100 | Serum | US
+
+# Triton
+https://rpc.solana.theindex.io | 100 | Triton | Global
+
+# Chainstack
+solana-mainnet.chainstack.com | 100 | Chainstack | Global
+
+# BlockDaemon
+mainnet.solana.blockdaemon.tech | 100 | BlockDaemon | US
+
+# 33.cn
+rpc.33.cn | 100 | 33.cn | China
+rpc.33.cn:8899 | 100 | 33.cn | China
+
+# MetaBlock
+api.metablocks.world/solana | 100 | MetaBlock | Global
+
+# Syndica
+solana-mainnet.syndica.io | 100 | Syndica | Global
+
+# NOWNodes
+solana.nownodes.io | 100 | NOWNodes | Global
+
+# GetBlock
+sol.getblock.io | 100 | GetBlock | Global
+
+# Pocket Network
+solana-mainnet.gateway.pokt.network | 100 | Pocket | Global
+
+# Blockdaemon
+mainnet.solana.blockdaemon.tech | 100 | Blockdaemon | US
+
+# Allnodes
+solana.public-rpc.com | 100 | Allnodes | Global
+
+# Solana Beach
+rpc.solanabeach.io | 100 | SolanaBeach | Global
+
+# Solflare
+rpc.solflare.com | 100 | Solflare | Global
+
+# Validators
+validator.rpcpool.com | 100 | Validators | Global
+
+# Solana FM
+mainnet-beta.rpc.solanafm.com | 100 | SolanaFM | Global
+
+# Solanium
+rpc.solanium.io | 100 | Solanium | Global
+
+# Solscan
+api.solscan.io | 100 | Solscan | Global
+
+# Raydium
+raydium.rpcpool.com | 100 | Raydium | Global
+
+# Magic Eden
+rpc-mainnet.magiceden.io | 100 | MagicEden | Global
+
+# Jupiter
+rpc.jup.ag | 100 | Jupiter | Global
+
+# Orca
+api.mainnet-beta.orca.so | 100 | Orca | Global
+
+# Marinade
+rpc.marinade.finance | 100 | Marinade | Global
+
+# Drift
+solana-rpc.drift.trade | 100 | Drift | Global
+
+# Mango
+api.mngo.cloud | 100 | Mango | Global
+
+# Metaplex
+api.metaplex.solana.com | 100 | Metaplex | Global
+
+# Phantom
+solana-mainnet.phantom.tech | 100 | Phantom | Global
+
+# Exodus
+solana.exodus.com | 100 | Exodus | Global
+
+# Slope
+mainnet.rpcpool.com | 100 | Slope | Global'
+
     while true; do
         echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
         echo "1. 导入节点列表"
         echo "2. 查看当前节点"
         echo "3. 测试节点延迟"
         echo "4. 编辑节点列表"
-        echo "5. 返回主菜单"
-        echo -n "请选择 [1-5]: "
+        echo "5. 使用默认公共RPC"
+        echo "6. 返回主菜单"
+        echo -n "请选择 [1-6]: "
         read choice
-        
-        case $choice in
+                case $choice in
             1)
                 echo -e "${YELLOW}>>> 请粘贴节点列表 (格式: IP | 延迟 | 供应商 | 位置)${RESET}"
                 echo -e "${YELLOW}>>> 输入完成后请按Ctrl+D结束${RESET}"
@@ -366,8 +486,16 @@ def test_node_latency(node, timeout=3, retries=2):
     """
     # 确保IP地址格式正确
     ip = node['ip'].strip()
-    base_ip = ip.split(':')[0]  # 获取基本IP，不含端口
-    endpoint = f"https://{base_ip}:8899"
+    
+    # 处理URL格式
+    if ip.startswith('http://') or ip.startswith('https://'):
+        endpoint = ip
+    else:
+        base_ip = ip.split(':')[0]  # 获取基本IP，不含端口
+        if ':' not in ip:  # 如果没有指定端口
+            endpoint = f"https://{base_ip}:8899"
+        else:
+            endpoint = f"https://{ip}"
     
     headers = {
         "Content-Type": "application/json"
@@ -443,30 +571,36 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     # 首先计算有效行数
     with open(input_file, 'r') as f:
         for line in f:
-            total_lines += 1
-            if '|' in line and '===' not in line and '---' not in line:
-                valid_lines += 1
+            if line.strip() and not line.strip().startswith('#'):
+                total_lines += 1
+                if '|' in line:
+                    valid_lines += 1
     
     print(f"\n\033[33m>>> 总行数: {total_lines}, 有效节点数: {valid_lines}\033[0m")
     
     with open(input_file, 'r') as f:
         for line in f:
-            if '|' not in line or '===' in line or '---' in line:
+            # 跳过空行和注释
+            if not line.strip() or line.strip().startswith('#'):
+                continue
+                
+            if '|' not in line:
                 continue
                 
             try:
                 parts = [p.strip() for p in line.split('|')]
                 if len(parts) >= 4:
-                    ip = parts[1].strip()
+                    ip = parts[0].strip()
                     
                     # 跳过重复IP
-                    base_ip = ip.split(':')[0]  # 获取基本IP，不含端口
+                    base_ip = ip.split(':')[0] if ':' in ip else ip  # 获取基本IP，不含端口
+                    base_ip = base_ip.replace('https://', '').replace('http://', '')
                     if base_ip in processed_ips:
                         continue
                     processed_ips.add(base_ip)
                     
                     try:
-                        reported_latency = float(parts[2].replace('ms', ''))
+                        reported_latency = float(parts[1].replace('ms', ''))
                     except:
                         reported_latency = 999
                     
@@ -475,15 +609,14 @@ def process_rpc_list(input_file, output_file, batch_size=100):
                         'reported_latency': reported_latency,
                         'real_latency': 999,
                         'is_working': False,
-                        'provider': parts[3].strip(),
-                        'location': parts[4].strip() if len(parts) > 4 else 'Unknown',
-                        'endpoint': f"https://{base_ip}:8899"
+                        'provider': parts[2].strip(),
+                        'location': parts[3].strip() if len(parts) > 3 else 'Unknown'
                     }
                     
                     batch.append(node)
                     
                     if len(batch) >= batch_size:
-                        print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{len(processed_ips)}\033[0m")
+                        print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
                         test_nodes_batch(batch)
                         nodes.extend(batch)
                         batch = []
@@ -494,7 +627,7 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     
     # 处理最后一批
     if batch:
-        print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{len(processed_ips)}\033[0m")
+        print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{valid_lines}\033[0m")
         test_nodes_batch(batch)
         nodes.extend(batch)
     
@@ -509,6 +642,15 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     print(f"\033[33m>>> 正在保存有效节点...\033[0m")
     with open(output_file, 'w') as f:
         for node in valid_nodes:
+            # 构建endpoint
+            ip = node['ip']
+            if not (ip.startswith('http://') or ip.startswith('https://')):
+                if ':' not in ip:
+                    node['endpoint'] = f"https://{ip}:8899"
+                else:
+                    node['endpoint'] = f"https://{ip}"
+            else:
+                node['endpoint'] = ip
             f.write(json.dumps(node) + '\n')
     
     print(f"\n\033[32m✓ 处理完成")
@@ -519,12 +661,12 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     
     # 打印节点信息
     print('\n当前最快的10个RPC节点:')
-    print('=' * 100)
-    print(f"{'IP地址':15} | {'实测延迟':8} | {'报告延迟':8} | {'状态':6} | {'供应商':15} | {'位置':30}")
-    print('-' * 100)
+    print('=' * 120)
+    print(f"{'节点地址':50} | {'实测延迟':8} | {'报告延迟':8} | {'状态':6} | {'供应商':15} | {'位置':20}")
+    print('-' * 120)
     for node in valid_nodes[:10]:
         status = '\033[32m可用\033[0m' if node.get('is_working', False) else '\033[31m不可用\033[0m'
-        print(f"{node['ip']:15} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {status:8} | {node['provider']:15} | {node['location']:30}")
+        print(f"{node['ip']:50} | {node['real_latency']:6.1f}ms | {node['reported_latency']:6.1f}ms | {status:8} | {node['provider']:15} | {node['location']:20}")
 
 def test_nodes_batch(nodes, max_workers=20):
     """并行测试节点"""
@@ -545,11 +687,11 @@ def test_nodes_batch(nodes, max_workers=20):
                 if is_working:
                     working_count += 1
                 status = '\033[32m可用\033[0m' if is_working else '\033[31m不可用\033[0m'
-                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: {latency:6.1f}ms | 状态: {status} | 可用率: {working_count/i*100:5.1f}%", end='\n')
+                print(f"\r处理: {i}/{total} | 节点: {node['ip']:50} | 延迟: {latency:6.1f}ms | 状态: {status} | 可用率: {working_count/i*100:5.1f}%", end='\n')
             except Exception as e:
                 node['real_latency'] = 999
                 node['is_working'] = False
-                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: 999.0ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
+                print(f"\r处理: {i}/{total} | 节点: {node['ip']:50} | 延迟: 999.0ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
@@ -599,6 +741,11 @@ EOF
                 fi
                 ;;
             5)
+                echo -e "${YELLOW}>>> 使用默认公共RPC节点...${RESET}"
+                echo "$DEFAULT_RPC_NODES" > "$ANALYSIS_FILE"
+                "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
+                ;;
+            6)
                 return
                 ;;
             *)
