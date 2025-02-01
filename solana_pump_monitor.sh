@@ -1663,9 +1663,100 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"\n\033[31m错误: {e}\033[0m")
         sys.exit(1)
-#===========================================
+       #===========================================
 # 主程序和菜单模块
 #===========================================
+
+# 生成Python监控脚本
+generate_python_script() {
+    echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
+    cat > "$PY_SCRIPT" << 'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import json
+import logging
+import requests
+import urllib3
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from wcferry import Wcf
+
+# 禁用SSL警告
+urllib3.disable_warnings()
+
+class TokenMonitor:
+    def __init__(self):
+        self.config_file = os.path.expanduser("~/.solana_pump.cfg")
+        self.rpc_file = os.path.expanduser("~/.solana_pump.rpc")
+        self.watch_file = os.path.expanduser("~/.solana_pump/watch_addresses.json")
+        self.config = self.load_config()
+        self.api_keys = self.config.get('api_keys', [])
+        self.current_key = 0
+        self.request_counts = {}
+        self.last_reset = {}
+        self.wcf = None
+        self.watch_addresses = self.load_watch_addresses()
+        self.init_wcf()
+        
+        # 初始化API密钥计数器
+        for key in self.api_keys:
+            if key.strip():
+                self.request_counts[key] = 0
+                self.last_reset[key] = time.time()
+
+        # 创建线程池
+        self.executor = ThreadPoolExecutor(max_workers=5)
+        
+        # 缓存已分析的地址
+        self.address_cache = {}
+        self.cache_expire = 3600  # 缓存1小时过期
+
+    def load_config(self):
+        try:
+            with open(self.config_file) as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"加载配置失败: {e}")
+            return {"api_keys": [], "serverchan": {"keys": []}, "wcf": {"groups": []}}
+
+    def load_watch_addresses(self):
+        try:
+            with open(self.watch_file) as f:
+                data = json.load(f)
+                return {addr['address']: addr['note'] for addr in data.get('addresses', [])}
+        except Exception as e:
+            logging.error(f"加载关注地址失败: {e}")
+            return {}
+
+    def init_wcf(self):
+        if self.config['wcf']['groups']:
+            try:
+                self.wcf = Wcf()
+                logging.info("WeChatFerry初始化成功")
+            except Exception as e:
+                logging.error(f"WeChatFerry初始化失败: {e}")
+                self.wcf = None
+
+    # ... [这里是TokenMonitor类的其他方法，之前已发送过]
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('monitor.log'),
+            logging.StreamHandler()
+        ]
+    )
+    monitor = TokenMonitor()
+    monitor.monitor()
+EOF
+
+    chmod +x "$PY_SCRIPT"
+    echo -e "${GREEN}✓ 监控脚本已生成${RESET}"
+}
 
 # 前后台控制
 toggle_foreground() {
@@ -1704,111 +1795,6 @@ start_monitor() {
     echo $! > "$PIDFILE"
     echo -e "${GREEN}>>> 监控已在后台启动 (PID: $!)${RESET}"
     echo -e "${GREEN}>>> 使用'3'选项可切换前台显示${RESET}"
-}
-
-# 关注地址管理
-manage_watch_addresses() {
-    WATCH_FILE="$HOME/.solana_pump/watch_addresses.json"
-    
-    # 确保文件存在
-    if [ ! -f "$WATCH_FILE" ]; then
-        mkdir -p "$HOME/.solana_pump"
-        echo '{"addresses":[]}' > "$WATCH_FILE"
-    fi
-    
-    while true; do
-        echo -e "\n${YELLOW}>>> 关注地址管理${RESET}"
-        echo "1. 添加关注地址"
-        echo "2. 删除关注地址"
-        echo "3. 查看关注列表"
-        echo "4. 导入地址列表"
-        echo "5. 返回主菜单"
-        echo -n "请选择 [1-5]: "
-        read choice
-        
-        case $choice in
-            1)
-                echo -e "${YELLOW}>>> 请输入要关注的地址：${RESET}"
-                read address
-                if [ ${#address} -eq 44 ]; then
-                    echo -e "${YELLOW}>>> 请输入备注信息：${RESET}"
-                    read note
-                    
-                    # 添加到JSON文件
-                    tmp=$(mktemp)
-                    jq --arg addr "$address" \
-                       --arg note "$note" \
-                       --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
-                       '.addresses += [{"address": $addr, "note": $note, "added_time": $time}]' \
-                       "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
-                    
-                    echo -e "${GREEN}✓ 地址已添加到关注列表${RESET}"
-                else
-                    echo -e "${RED}✗ 无效的Solana地址${RESET}"
-                fi
-                ;;
-            2)
-                addresses=$(jq -r '.addresses[] | "\(.address) [\(.note)]"' "$WATCH_FILE")
-                if [ ! -z "$addresses" ]; then
-                    echo -e "\n当前关注的地址："
-                    i=1
-                    while IFS= read -r line; do
-                        echo "$i. $line"
-                        i=$((i+1))
-                    done <<< "$addresses"
-                    
-                    echo -e "\n${YELLOW}>>> 请输入要删除的编号：${RESET}"
-                    read num
-                    if [[ $num =~ ^[0-9]+$ ]]; then
-                        tmp=$(mktemp)
-                        jq "del(.addresses[$(($num-1))])" "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
-                        echo -e "${GREEN}✓ 地址已从关注列表移除${RESET}"
-                    else
-                        echo -e "${RED}无效的编号${RESET}"
-                    fi
-                else
-                    echo -e "${YELLOW}没有关注的地址${RESET}"
-                fi
-                ;;
-            3)
-                addresses=$(jq -r '.addresses[] | "\(.address) [\(.note)] - 添加时间: \(.added_time)"' "$WATCH_FILE")
-                if [ ! -z "$addresses" ]; then
-                    echo -e "\n当前关注的地址："
-                    echo "=============================================="
-                    i=1
-                    while IFS= read -r line; do
-                        echo "$i. $line"
-                        i=$((i+1))
-                    done <<< "$addresses"
-                    echo "=============================================="
-                else
-                    echo -e "${YELLOW}没有关注的地址${RESET}"
-                fi
-                ;;
-            4)
-                echo -e "${YELLOW}>>> 请粘贴地址列表（每行格式：地址 备注），完成后按Ctrl+D：${RESET}"
-                while IFS= read -r line; do
-                    address=$(echo "$line" | awk '{print $1}')
-                    note=$(echo "$line" | cut -d' ' -f2-)
-                    if [ ${#address} -eq 44 ]; then
-                        tmp=$(mktemp)
-                        jq --arg addr "$address" \
-                           --arg note "$note" \
-                           --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
-                           '.addresses += [{"address": $addr, "note": $note, "added_time": $time}]' \
-                           "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
-                    fi
-                done
-                echo -e "${GREEN}✓ 地址导入完成${RESET}"
-                ;;
-            5)
-                return
-                ;;
-            *)
-                echo -e "${RED}无效选项!${RESET}"
-                ;;
-        esac
-    done
 }
 
 # 主菜单
@@ -1858,5 +1844,4 @@ case $1 in
             esac
         done
         ;;
-esac     
-      
+esac 
