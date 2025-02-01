@@ -1280,7 +1280,7 @@ EOFPYTHON
 # 生成Python监控脚本
 generate_python_script() {
     echo -e "${YELLOW}>>> 生成监控脚本...${RESET}"
-    cat > "$PY_SCRIPT" << 'EOF'
+cat > "$PY_SCRIPT" << 'EOF'
 #!/usr/bin/env python3
 import os
 import sys
