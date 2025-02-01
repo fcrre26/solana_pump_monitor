@@ -862,28 +862,21 @@ class TokenMonitor:
             except Exception as e:
                 logging.error(f"初始化WeChatFerry失败: {e}")
 
-    def get_best_rpc(self):
-        """获取最佳RPC节点"""
-        DEFAULT_RPC = [
-            "https://api.mainnet-beta.solana.com",
-            "https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff",
-            "https://api.devnet.solana.com",
-            "https://solana-api.projectserum.com",
-            "https://rpc.ankr.com/solana"
-        ]
-        
-        try:
-            if os.path.exists(self.rpc_file):
-                with open(self.rpc_file) as f:
-                    nodes = [line.strip().split('|')[0] for line in f if line.strip()]
-                    if nodes:
-                        return nodes[0]
-        except Exception as e:
-            logging.warning(f"读取RPC配置失败: {e}")
-        
-        current_rpc = DEFAULT_RPC[0]
-        logging.info(f"使用默认RPC节点: {current_rpc}")
-        return current_rpc
+def get_best_rpc(self):
+    """获取最佳RPC节点"""
+    try:
+        with open(self.rpc_file) as f:
+            rpc_url = f.read().strip()
+            if rpc_url.startswith('https://'):
+                logging.info(f"使用RPC节点: {rpc_url}")
+                return rpc_url
+    except Exception as e:
+        logging.error(f"读取RPC文件失败: {e}")
+    
+    # 如果读取失败，使用默认RPC
+    default_rpc = "https://api.mainnet-beta.solana.com"
+    logging.info(f"使用默认RPC节点: {default_rpc}")
+    return default_rpc
 
     def get_next_api_key(self):
         """轮询获取下一个API密钥"""
