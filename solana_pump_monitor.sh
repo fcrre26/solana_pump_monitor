@@ -616,7 +616,7 @@ generate_python_script() {
     mkdir -p "$(dirname "$PY_SCRIPT")"
     
     # 注意: 这里的EOFPYTHON必须顶格写，不能有缩进
-    cat > "$PY_SCRIPT" << 'EOFPYTHON'
+cat > "$PY_SCRIPT" << 'EOFPYTHON'
 #!/usr/bin/env python3
 import os
 import sys
