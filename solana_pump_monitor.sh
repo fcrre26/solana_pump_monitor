@@ -332,6 +332,10 @@ manage_rpc() {
     # 首先确保目录存在
     mkdir -p "$HOME/.solana_pump"
     
+    # 创建分析文件（如果不存在）
+    ANALYSIS_FILE="$HOME/.solana_pump/detailed_analysis.txt"
+    touch "$ANALYSIS_FILE"
+    
     # 确保Python依赖已安装
     pip3 install requests urllib3 >/dev/null 2>&1
     
@@ -340,21 +344,23 @@ manage_rpc() {
         echo "1. 导入RPC节点列表"
         echo "2. 查看当前节点"
         echo "3. 测试节点延迟"
-        echo "4. 返回主菜单"
-        echo -n "请选择 [1-4]: "
+        echo "4. 编辑节点列表"
+        echo "5. 返回主菜单"
+        echo -n "请选择 [1-5]: "
         read choice
         
         case $choice in
             1)
-                echo -e "${YELLOW}>>> 请粘贴RPC节点列表 (完成后按Ctrl+D)：${RESET}"
-                TMP_FILE=$(mktemp)
-                cat > "$TMP_FILE"
+                echo -e "${YELLOW}>>> 请粘贴RPC节点列表到 $ANALYSIS_FILE${RESET}"
+                echo -e "${YELLOW}>>> 完成后按任意键继续...${RESET}"
+                read -n 1
                 
-                # 确保目录存在
-                mkdir -p "$(dirname "$RPC_FILE")"
-                
-                # 生成Python处理脚本
-                cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
+                if [ -f "$ANALYSIS_FILE" ]; then
+                    # 确保目录存在
+                    mkdir -p "$(dirname "$RPC_FILE")"
+                    
+                    # 生成Python处理脚本
+                    cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
 #!/usr/bin/env python3
 import sys
 import json
@@ -515,11 +521,13 @@ if __name__ == '__main__':
         sys.exit(1)
 EOF
 
-                chmod +x "$HOME/.solana_pump/process_rpc.py"
-                
-                # 运行处理脚本
-                "$HOME/.solana_pump/process_rpc.py" "$TMP_FILE" "$RPC_FILE"
-                rm -f "$TMP_FILE"
+                    chmod +x "$HOME/.solana_pump/process_rpc.py"
+                    
+                    # 运行处理脚本
+                    "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
+                else
+                    echo -e "${RED}>>> 节点列表文件不存在${RESET}"
+                fi
                 ;;
             2)
                 if [ -f "$RPC_FILE" ]; then
@@ -541,6 +549,14 @@ EOF
                 fi
                 ;;
             4)
+                # 编辑节点列表
+                if [ -n "$(command -v vim)" ]; then
+                    vim "$ANALYSIS_FILE"
+                else
+                    nano "$ANALYSIS_FILE"
+                fi
+                ;;
+            5)
                 return
                 ;;
             *)
@@ -549,7 +565,6 @@ EOF
         esac
     done
 }
-
 
 # 生成Python监控脚本
 generate_python_script() {
