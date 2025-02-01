@@ -441,34 +441,49 @@ def test_nodes_batch(nodes, max_workers=20):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         total = len(nodes)
+        working_count = 0
         
         for i, node in enumerate(nodes, 1):
             future = executor.submit(test_node_latency, node)
             futures.append((node, future))
-            print(f"\r测试进度: {i}/{total}", end='')
-        
-        print()
-        
-        for node, future in futures:
+            
+        for i, (node, future) in enumerate(futures, 1):
             try:
                 latency, is_working = future.result()
                 node['real_latency'] = latency
                 node['is_working'] = is_working
+                if is_working:
+                    working_count += 1
+                status = '\033[32m可用\033[0m' if is_working else '\033[31m不可用\033[0m'
+                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: {latency:6.1f}ms | 状态: {status} | 可用率: {working_count/i*100:5.1f}%", end='\n')
             except Exception as e:
                 node['real_latency'] = 999
                 node['is_working'] = False
+                print(f"\r处理: {i}/{total} | IP: {node['ip']:15} | 延迟: 999ms | 状态: \033[31m错误\033[0m | 可用率: {working_count/i*100:5.1f}%", end='\n')
 
 def process_rpc_list(input_file, output_file, batch_size=100):
     """分批处理RPC节点列表"""
     nodes = []
     batch = []
     batch_count = 0
+    processed_ips = set()
+    total_lines = 0
+    valid_lines = 0
     
     print(f"\n\033[33m>>> 开始处理RPC节点列表...\033[0m")
     
     # 禁用SSL警告
     import urllib3
     urllib3.disable_warnings()
+    
+    # 首先计算有效行数
+    with open(input_file, 'r') as f:
+        for line in f:
+            total_lines += 1
+            if '|' in line and '===' not in line and '---' not in line:
+                valid_lines += 1
+    
+    print(f"\n\033[33m>>> 总行数: {total_lines}, 有效节点数: {valid_lines}\033[0m")
     
     with open(input_file, 'r') as f:
         for line in f:
@@ -478,25 +493,32 @@ def process_rpc_list(input_file, output_file, batch_size=100):
             try:
                 parts = [p.strip() for p in line.split('|')]
                 if len(parts) >= 4:
+                    ip = parts[1].strip()
+                    
+                    # 跳过重复IP
+                    if ip in processed_ips:
+                        continue
+                    processed_ips.add(ip)
+                    
                     try:
                         reported_latency = float(parts[2].replace('ms', ''))
                     except:
                         reported_latency = 999
                     
                     node = {
-                        'ip': parts[1].strip(),
+                        'ip': ip,
                         'reported_latency': reported_latency,
                         'real_latency': 999,
                         'is_working': False,
                         'provider': parts[3].strip(),
                         'location': parts[4].strip() if len(parts) > 4 else 'Unknown',
-                        'endpoint': f"https://{parts[1].strip()}:8899"
+                        'endpoint': f"https://{ip}:8899"
                     }
                     
                     batch.append(node)
                     
                     if len(batch) >= batch_size:
-                        print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)...\033[0m")
+                        print(f"\n\033[33m>>> 测试第 {batch_count+1} 批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{len(processed_ips)}\033[0m")
                         test_nodes_batch(batch)
                         nodes.extend(batch)
                         batch = []
@@ -507,7 +529,7 @@ def process_rpc_list(input_file, output_file, batch_size=100):
     
     # 处理最后一批
     if batch:
-        print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)...\033[0m")
+        print(f"\n\033[33m>>> 测试最后一批节点 ({len(batch)}个)... 总进度: {len(nodes)+len(batch)}/{len(processed_ips)}\033[0m")
         test_nodes_batch(batch)
         nodes.extend(batch)
     
@@ -524,7 +546,11 @@ def process_rpc_list(input_file, output_file, batch_size=100):
         for node in valid_nodes:
             f.write(json.dumps(node) + '\n')
     
-    print(f"\n\033[32m✓ {len(valid_nodes)} 个有效节点已保存到 {output_file}\033[0m")
+    print(f"\n\033[32m✓ 处理完成")
+    print(f"总节点数: {len(nodes)}")
+    print(f"有效节点数: {len(valid_nodes)}")
+    print(f"可用率: {len(valid_nodes)/len(nodes)*100:.1f}%")
+    print(f"结果已保存到: {output_file}\033[0m")
     
     # 打印节点信息
     print('\n当前最快的10个RPC节点:')
