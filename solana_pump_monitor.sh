@@ -842,9 +842,13 @@ import time
 import json
 import logging
 import requests
+import urllib3
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from wcferry import Wcf
+
+# 禁用SSL警告
+urllib3.disable_warnings()
 
 # 设置UTC+8时区
 TZ = timezone(timedelta(hours=8))
@@ -872,12 +876,21 @@ class TokenMonitor:
         self.watch_addresses = self.load_watch_addresses()
         self.init_wcf()
         
+        # 初始化API密钥计数器
         for key in self.api_keys:
             if key.strip():
                 self.request_counts[key] = 0
                 self.last_reset[key] = time.time()
 
+        # 创建线程池
+        self.executor = ThreadPoolExecutor(max_workers=5)
+        
+        # 缓存已分析的地址
+        self.address_cache = {}
+        self.cache_expire = 3600  # 缓存1小时过期
+
     def load_config(self):
+        """加载配置文件"""
         try:
             with open(self.config_file) as f:
                 return json.load(f)
@@ -906,6 +919,7 @@ class TokenMonitor:
                 self.wcf = None
 
     def get_next_api_key(self):
+        """获取下一个可用的API密钥"""
         now = time.time()
         for key in self.api_keys:
             if not key.strip():
@@ -922,6 +936,7 @@ class TokenMonitor:
         raise Exception("所有API密钥已达到限制")
 
     def get_best_rpc(self):
+        """获取最佳RPC节点"""
         try:
             with open(self.rpc_file) as f:
                 nodes = [json.loads(line) for line in f]
@@ -933,27 +948,63 @@ class TokenMonitor:
             return "https://api.mainnet-beta.solana.com"
 
     def fetch_token_info(self, mint):
+        """获取代币详细信息"""
         try:
             headers = {"X-API-KEY": self.get_next_api_key()}
+            
+            # 获取基本信息
             url = f"https://public-api.birdeye.so/public/token_metadata?address={mint}"
             resp = requests.get(url, headers=headers, timeout=5)
             data = resp.json()
             
             if data.get("success"):
                 token_data = data["data"]
+                
+                # 获取持有人信息
+                holders_url = f"https://public-api.birdeye.so/public/token_holders?address={mint}"
+                holders_resp = requests.get(holders_url, headers=headers, timeout=5)
+                holders_data = holders_resp.json().get("data", [])
+                
+                # 计算持有人集中度
+                total_supply = float(token_data.get("supply", 0))
+                holder_concentration = 0
+                if holders_data and total_supply > 0:
+                    top_10_holdings = sum(float(h.get("amount", 0)) for h in holders_data[:10])
+                    holder_concentration = (top_10_holdings / total_supply) * 100
+                
                 return {
+                    "name": token_data.get("name", "Unknown"),
+                    "symbol": token_data.get("symbol", "Unknown"),
                     "price": float(token_data.get("price", 0)),
                     "supply": float(token_data.get("supply", 0)),
                     "market_cap": float(token_data.get("price", 0)) * float(token_data.get("supply", 0)),
-                    "liquidity": float(token_data.get("liquidity", 0))
+                    "liquidity": float(token_data.get("liquidity", 0)),
+                    "holder_count": len(holders_data),
+                    "holder_concentration": holder_concentration,
+                    "verified": token_data.get("verified", False)
                 }
         except Exception as e:
             logging.error(f"获取代币信息失败: {e}")
         
-        return {"price": 0, "supply": 0, "market_cap": 0, "liquidity": 0}
-
-    def analyze_creator_history(self, creator):
+        return {
+            "name": "Unknown",
+            "symbol": "Unknown",
+            "price": 0,
+            "supply": 0,
+            "market_cap": 0,
+            "liquidity": 0,
+            "holder_count": 0,
+            "holder_concentration": 0,
+            "verified": False
+        }
+            def analyze_creator_history(self, creator):
+        """分析创建者历史"""
         try:
+            if creator in self.address_cache:
+                cache_data = self.address_cache[creator]
+                if time.time() - cache_data['timestamp'] < self.cache_expire:
+                    return cache_data['history']
+
             headers = {"X-API-KEY": self.get_next_api_key()}
             url = f"https://public-api.birdeye.so/public/address_activity?address={creator}"
             resp = requests.get(url, headers=headers, timeout=5)
@@ -964,12 +1015,36 @@ class TokenMonitor:
                 for tx in data["data"]:
                     if "mint" in tx:
                         token_info = self.fetch_token_info(tx["mint"])
+                        
+                        # 获取历史最高市值
+                        max_market_cap = 0
+                        try:
+                            history_url = f"https://public-api.birdeye.so/public/token_price_history?address={tx['mint']}"
+                            history_resp = requests.get(history_url, headers=headers, timeout=5)
+                            if history_resp.status_code == 200:
+                                price_history = history_resp.json().get("data", [])
+                                if price_history:
+                                    max_price = max(float(p.get("value", 0)) for p in price_history)
+                                    max_market_cap = max_price * token_info["supply"]
+                        except:
+                            pass
+
                         history.append({
                             "mint": tx["mint"],
                             "timestamp": tx["timestamp"],
-                            "market_cap": token_info["market_cap"],
+                            "current_market_cap": token_info["market_cap"],
+                            "max_market_cap": max_market_cap,
+                            "liquidity": token_info["liquidity"],
+                            "holder_count": token_info["holder_count"],
+                            "holder_concentration": token_info["holder_concentration"],
                             "status": "活跃" if token_info["market_cap"] > 0 else "已退出"
                         })
+
+                # 缓存结果
+                self.address_cache[creator] = {
+                    'timestamp': time.time(),
+                    'history': history
+                }
                 return history
         except Exception as e:
             logging.error(f"获取创建者历史失败: {e}")
@@ -981,7 +1056,8 @@ class TokenMonitor:
         try:
             related_addresses = set()
             relations = []
-            watch_hits = []  # 新增：记录命中的关注地址
+            watch_hits = []
+            high_value_relations = []
             
             # 1. 分析转账历史
             headers = {"X-API-KEY": self.get_next_api_key()}
@@ -990,26 +1066,32 @@ class TokenMonitor:
             data = resp.json()
             
             if data.get("success"):
+                # 记录地址首次交易时间
+                first_tx_time = float('inf')
                 for tx in data["data"]:
+                    first_tx_time = min(first_tx_time, tx.get("timestamp", float('inf')))
+                    
                     # 记录所有交互过的地址
                     if tx.get("from") and tx["from"] != creator:
                         related_addresses.add(tx["from"])
-                        # 检查是否是关注地址
                         if tx["from"] in self.watch_addresses:
                             watch_hits.append({
                                 'address': tx["from"],
                                 'note': self.watch_addresses[tx["from"]],
-                                'type': 'transfer_from'
+                                'type': 'transfer_from',
+                                'amount': tx.get("amount", 0),
+                                'timestamp': tx["timestamp"]
                             })
                             
                     if tx.get("to") and tx["to"] != creator:
                         related_addresses.add(tx["to"])
-                        # 检查是否是关注地址
                         if tx["to"] in self.watch_addresses:
                             watch_hits.append({
                                 'address': tx["to"],
                                 'note': self.watch_addresses[tx["to"]],
-                                'type': 'transfer_to'
+                                'type': 'transfer_to',
+                                'amount': tx.get("amount", 0),
+                                'timestamp': tx["timestamp"]
                             })
                         
                     # 特别关注大额转账
@@ -1020,154 +1102,254 @@ class TokenMonitor:
                             "amount": tx["amount"],
                             "timestamp": tx["timestamp"]
                         })
+                
+                # 计算钱包年龄（天）
+                wallet_age = (time.time() - first_tx_time) / (24 * 3600) if first_tx_time != float('inf') else 0
             
-            # 2. 分析代币创建历史
+            # 2. 深度分析关联地址
             for address in related_addresses:
+                # 分析代币创建历史
                 token_history = self.analyze_creator_history(address)
                 if token_history:
+                    # 找出高价值代币（最高市值超过1亿美元）
+                    high_value_tokens = [t for t in token_history 
+                                       if t["max_market_cap"] > 100_000_000]
+                    
+                    if high_value_tokens:
+                        high_value_relations.append({
+                            "address": address,
+                            "tokens": high_value_tokens,
+                            "total_created": len(token_history)
+                        })
+                    
                     relations.append({
                         "address": address,
                         "type": "token_creator",
                         "tokens": len(token_history),
-                        "success_rate": sum(1 for t in token_history if t["status"] == "活跃") / len(token_history)
+                        "success_rate": sum(1 for t in token_history if t["status"] == "活跃") / len(token_history),
+                        "high_value_tokens": len(high_value_tokens)
                     })
             
             # 3. 分析共同签名者
-            for address in related_addresses:
-                try:
-                    tx_url = f"https://public-api.solscan.io/account/transactions?account={address}"
-                    tx_resp = requests.get(tx_url, timeout=5)
-                    tx_data = tx_resp.json()
-                    
-                    for tx in tx_data[:100]:  # 只看最近100笔交易
-                        if creator in tx.get("signatures", []):
-                            relations.append({
-                                "address": address,
-                                "type": "co_signer",
-                                "tx_hash": tx["signature"],
-                                "timestamp": tx["blockTime"]
-                            })
-                except:
-                    continue
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = []
+                for address in related_addresses:
+                    futures.append(executor.submit(self._analyze_cosigners, 
+                                                address, creator))
+                
+                for future in futures:
+                    try:
+                        result = future.result()
+                        if result:
+                            relations.extend(result)
+                    except:
+                        continue
             
             return {
+                "wallet_age": wallet_age,
+                "is_new_wallet": wallet_age < 7,  # 小于7天视为新钱包
                 "related_addresses": list(related_addresses),
                 "relations": relations,
-                "watch_hits": watch_hits,  # 新增：返回命中的关注地址
-                "risk_score": self.calculate_risk_score(relations)
+                "watch_hits": watch_hits,
+                "high_value_relations": high_value_relations,
+                "risk_score": self.calculate_risk_score(relations, wallet_age)
             }
         except Exception as e:
             logging.error(f"分析地址关联性失败: {e}")
-            return {"related_addresses": [], "relations": [], "watch_hits": [], "risk_score": 0}
+            return {
+                "wallet_age": 0,
+                "is_new_wallet": True,
+                "related_addresses": [],
+                "relations": [],
+                "watch_hits": [],
+                "high_value_relations": [],
+                "risk_score": 0
+            }
 
-    def calculate_risk_score(self, relations):
-        """计算风险分数"""
+    def _analyze_cosigners(self, address, creator):
+        """分析共同签名者（辅助函数）"""
+        try:
+            tx_url = f"https://public-api.solscan.io/account/transactions?account={address}"
+            tx_resp = requests.get(tx_url, timeout=5)
+            tx_data = tx_resp.json()
+            
+            cosigner_relations = []
+            for tx in tx_data[:100]:  # 只看最近100笔交易
+                if creator in tx.get("signatures", []):
+                    cosigner_relations.append({
+                        "address": address,
+                        "type": "co_signer",
+                        "tx_hash": tx["signature"],
+                        "timestamp": tx["blockTime"]
+                    })
+            return cosigner_relations
+        except:
+            return []
+
+    def calculate_risk_score(self, relations, wallet_age):
+        """计算风险分数（优化版）"""
         score = 0
         
-        # 统计关联地址数量
-        unique_addresses = len(set(r["address"] for r in relations))
-        if unique_addresses > 10:
-            score += 20
+        # 1. 钱包年龄评分 (0-25分)
+        if wallet_age < 1:  # 小于1天
+            score += 25
+        elif wallet_age < 7:  # 小于7天
+            score += 15
+        elif wallet_age < 30:  # 小于30天
+            score += 5
         
-        # 分析代币创建者历史
+        # 2. 关联地址评分 (0-25分)
+        unique_addresses = len(set(r["address"] for r in relations))
+        if unique_addresses > 20:
+            score += 25
+        elif unique_addresses > 10:
+            score += 15
+        elif unique_addresses > 5:
+            score += 5
+        
+        # 3. 代币创建者分析 (0-25分)
         token_creators = [r for r in relations if r["type"] == "token_creator"]
         if token_creators:
+            # 计算平均成功率
             avg_success = sum(t["success_rate"] for t in token_creators) / len(token_creators)
-            if avg_success < 0.3:  # 成功率低于30%
-                score += 30
+            # 计算高价值代币数量
+            high_value_count = sum(t.get("high_value_tokens", 0) for t in token_creators)
+            
+            if avg_success < 0.2:  # 成功率低于20%
+                score += 25
+            elif avg_success < 0.4:  # 成功率低于40%
+                score += 15
+            elif avg_success < 0.6:  # 成功率低于60%
+                score += 5
+            
+            # 如果有高价值代币历史，降低风险分数
+            if high_value_count > 0:
+                score = max(0, score - 15)
         
-        # 分析大额转账
+        # 4. 交易行为评分 (0-25分)
         large_transfers = [r for r in relations if r["type"] == "transfer" and r["amount"] > 10]
-        if large_transfers:
-            score += min(len(large_transfers) * 5, 25)
+        suspicious_patterns = len([t for t in large_transfers if any(
+            abs(t["timestamp"] - other["timestamp"]) < 300  # 5分钟内
+            for other in large_transfers
+            if t != other
+        )])
         
-        # 分析共同签名
-        co_signers = [r for r in relations if r["type"] == "co_signer"]
-        if co_signers:
-            score += min(len(co_signers) * 2, 25)
+        if suspicious_patterns > 5:
+            score += 25
+        elif suspicious_patterns > 2:
+            score += 15
+        elif suspicious_patterns > 0:
+            score += 5
         
         return min(score, 100)  # 最高100分
-
     def format_alert_message(self, data):
+        """格式化警报消息（优化版）"""
         creator = data["creator"]
         mint = data["mint"]
         token_info = data["token_info"]
         history = data["history"]
         relations = data["relations"]
         
-        active_tokens = sum(1 for t in history if t["status"] == "活跃")
-        success_rate = active_tokens / len(history) if history else 0
-        
         msg = f"""
-🚨 新代币警报 (UTC+8)
+🚨 新代币创建监控 (UTC+8)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-📋 合约地址: 
-{mint}
+📋 基本信息:
+• 代币地址: {mint}
+• 创建者: {creator}
+• 钱包状态: {'🆕 新钱包' if relations['is_new_wallet'] else '📅 老钱包'}
+• 钱包年龄: {relations['wallet_age']:.1f} 天
 
-👤 创建者地址: 
-{creator}"""
-
-        # 添加关注地址信息
-        if creator in self.watch_addresses:
-            msg += f"\n⭐ 重点关注地址！\n备注: {self.watch_addresses[creator]}"
-
-        msg += f"""
-
-💰 代币信息:
+💰 代币数据:
 • 初始市值: ${token_info['market_cap']:,.2f}
 • 代币供应量: {token_info['supply']:,.0f}
 • 单价: ${token_info['price']:.8f}
 • 流动性: {token_info['liquidity']:.2f} SOL
+• 持有人数: {token_info['holder_count']}
+• 前10持有人占比: {token_info['holder_concentration']:.1f}%"""
 
-👥 地址关联分析:
-• 关联地址数: {len(relations['related_addresses'])}
-• 风险评分: {relations['risk_score']}/100
-"""
-        
+        # 添加关注地址信息
+        if creator in self.watch_addresses:
+            msg += f"\n\n⭐ 重点关注地址！\n• 备注: {self.watch_addresses[creator]}"
+
+        # 添加风险评分
+        risk_level = "高" if relations['risk_score'] >= 70 else "中" if relations['risk_score'] >= 40 else "低"
+        msg += f"""
+
+🎯 风险评估:
+• 综合风险评分: {relations['risk_score']}/100
+• 风险等级: {risk_level}
+• 关联地址数: {len(relations['related_addresses'])}"""
+
+        # 添加高价值关联信息
+        if relations['high_value_relations']:
+            msg += "\n\n💎 发现高价值关联方:"
+            for relation in relations['high_value_relations'][:3]:  # 只显示前3个
+                msg += f"""
+• 地址: {relation['address']}
+  - 创建代币总数: {relation['total_created']}
+  - 高价值代币数: {len(relation['tokens'])}"""
+                for token in relation['tokens'][:2]:  # 每个地址只显示前2个高价值代币
+                    creation_time = datetime.fromtimestamp(token["timestamp"], tz=TZ)
+                    msg += f"""
+  - {token['mint']}
+    创建时间: {creation_time.strftime('%Y-%m-%d %H:%M:%S')}
+    最高市值: ${token['max_market_cap']:,.2f}
+    当前市值: ${token['current_market_cap']:,.2f}"""
+
         # 添加关联的关注地址信息
         if relations['watch_hits']:
-            msg += "\n⚠️ 发现关联的关注地址:\n"
+            msg += "\n\n⚠️ 发现关联的关注地址:"
             for hit in relations['watch_hits']:
-                msg += f"• {hit['address']}\n  备注: {hit['note']}\n  关联类型: {hit['type']}\n"
+                timestamp = datetime.fromtimestamp(hit["timestamp"], tz=TZ)
+                msg += f"""
+• {hit['address']}
+  - 备注: {hit['note']}
+  - 关联类型: {hit['type']}
+  - 交易金额: {hit['amount']:.2f} SOL
+  - 交易时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"""
+
+        # 添加创建者历史记录
+        if history:
+            active_tokens = sum(1 for t in history if t["status"] == "活跃")
+            success_rate = active_tokens / len(history) if history else 0
+            msg += f"""
+
+📜 创建者历史:
+• 历史代币数: {len(history)}
+• 当前活跃: {active_tokens}
+• 成功率: {success_rate:.1%}
+
+最近代币记录:"""
+            for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:3]:
+                timestamp = datetime.fromtimestamp(token["timestamp"], tz=TZ)
+                msg += f"""
+• {token['mint']}
+  - 创建时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}
+  - 最高市值: ${token['max_market_cap']:,.2f}
+  - 当前市值: ${token['current_market_cap']:,.2f}
+  - 当前状态: {token['status']}"""
+
+        # 添加投资建议
+        msg += "\n\n💡 投资建议:"
+        if relations['is_new_wallet']:
+            msg += "\n• ⚠️ 新钱包创建，需谨慎对待"
+        if relations['high_value_relations']:
+            msg += "\n• 🌟 发现高价值关联方，可能是成功团队新项目"
+        if success_rate > 0.5:
+            msg += "\n• ✅ 创建者历史表现良好"
+        if relations['risk_score'] >= 70:
+            msg += "\n• ❗ 高风险项目，建议谨慎"
         
-        # 添加重要关联信息
-        important_relations = [r for r in relations['relations'] 
-                             if r["type"] in ["token_creator", "co_signer"] 
-                             or (r["type"] == "transfer" and r["amount"] > 10)]
-        if important_relations:
-            msg += "\n🔍 重要关联:\n"
-            for r in sorted(important_relations, 
-                           key=lambda x: x.get("timestamp", 0), 
-                           reverse=True)[:3]:
-                if r["type"] == "token_creator":
-                    msg += f"• 关联创建者: {r['address'][:8]}...{r['address'][-6:]}\n"
-                    msg += f"  - 代币数: {r['tokens']}\n"
-                    msg += f"  - 成功率: {r['success_rate']:.0%}\n"
-                elif r["type"] == "transfer":
-                    msg += f"• 大额转账: {r['amount']} SOL\n"
-                    msg += f"  - 地址: {r['address'][:8]}...{r['address'][-6:]}\n"
-                elif r["type"] == "co_signer":
-                    msg += f"• 共同签名: {r['address'][:8]}...{r['address'][-6:]}\n"
-        
-        msg += "\n📜 历史代币记录:\n"
-        for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:5]:
-            timestamp = datetime.fromtimestamp(token["timestamp"], tz=TZ)
-            msg += f"• {timestamp.strftime('%Y-%m-%d %H:%M:%S')} - {token['mint']}\n"
-            msg += f"  - 市值: ${token['market_cap']:,.0f}\n"
-            msg += f"  - 当前状态: {token['status']}\n"
-        
-        current_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')
+        # 添加快速链接
         msg += f"""
-⚠️ 风险提示:
-• 创建者历史代币数: {len(history)}
-• 成功率: {success_rate:.0%}
 
 🔗 快速链接:
 • Birdeye: https://birdeye.so/token/{mint}
 • Solscan: https://solscan.io/token/{mint}
+• 创建者: https://solscan.io/account/{creator}
 
-⏰ 发现时间: {current_time} (UTC+8)
+⏰ 发现时间: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)
 """
         return msg
 
@@ -1193,6 +1375,7 @@ class TokenMonitor:
                     logging.error(f"WeChatFerry推送失败 ({group['name']}): {e}")
 
     def monitor(self):
+        """主监控函数"""
         logging.info("监控启动...")
         last_slot = 0
         PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDfgCcMKJ"
@@ -1261,6 +1444,9 @@ EOF
 
     chmod +x $PY_SCRIPT
 }
+
+
+
 
 # 前后台控制
 toggle_foreground() {
