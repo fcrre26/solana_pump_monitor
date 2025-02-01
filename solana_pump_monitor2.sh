@@ -917,21 +917,27 @@ class TokenMonitor:
     def format_market_cap(self, market_cap):
         """格式化市值显示"""
         return f"${self.format_number(market_cap)}"
-            def get_best_rpc(self):
-        """获取最佳RPC节点"""
-        try:
-            with open(self.rpc_file) as f:
-                rpc_url = f.read().strip()
-                if rpc_url.startswith('https://'):
-                    logging.info(f"使用RPC节点: {rpc_url}")
-                    return rpc_url
-        except Exception as e:
-            logging.error(f"读取RPC文件失败: {e}")
+def get_best_rpc(self):
+    """获取最佳RPC节点"""
+    rpc_file = "/root/.solana_pump.rpc"  # 修改为指定路径
+    try:
+        # 检查文件是否存在且非空
+        if not os.path.exists(rpc_file) or os.path.getsize(rpc_file) == 0:
+            logging.error(f"RPC文件 {rpc_file} 不存在或为空")
+            return "https://api.mainnet-beta.solana.com"
         
-        # 使用默认RPC
-        default_rpc = "https://api.mainnet-beta.solana.com"
-        logging.info(f"使用默认RPC节点: {default_rpc}")
-        return default_rpc
+        with open(rpc_file) as f:
+            rpc_url = f.read().strip()
+            if rpc_url.startswith('https://'):
+                logging.info(f"使用RPC节点: {rpc_url}")
+                return rpc_url
+    except Exception as e:
+        logging.error(f"读取RPC文件失败: {e}")
+    
+    # 使用默认RPC
+    default_rpc = "https://api.mainnet-beta.solana.com"
+    logging.info(f"使用默认RPC节点: {default_rpc}")
+    return default_rpc
 
     def load_watch_addresses(self):
         """加载关注地址"""
