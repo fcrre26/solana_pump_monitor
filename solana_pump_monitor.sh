@@ -631,9 +631,14 @@ test_default_nodes() {
     # 清理临时文件
     rm -f "$temp_file"
     
-    # 验证输出文件
-    if [ -f "$output_file" ]; then
+    # 验证输出文件并确保至少保存一个最佳节点
+    if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+        # 确保保存最佳节点
+        head -n 1 "$output_file" > "$RPC_DIR/best_rpc.txt"
+        # 复制一份到Python脚本使用的位置
+        cp "$RPC_DIR/best_rpc.txt" "$HOME/.solana_pump.rpc"
         echo -e "${GREEN}✓ RPC配置已更新${RESET}"
+        echo -e "${GREEN}✓ 已选择延迟最低的节点作为当前RPC${RESET}"
     else
         echo -e "${RED}✗ RPC配置更新失败${RESET}"
     fi
