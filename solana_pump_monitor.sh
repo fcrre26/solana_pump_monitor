@@ -354,7 +354,101 @@ send_test_notification()
 EOF
 }
 
+# 在 setup_notification 函数后添加:
+
 #===========================================
+# 关注地址管理模块
+#===========================================
+manage_watch_addresses() {
+    local WATCH_DIR="$HOME/.solana_pump"
+    local WATCH_FILE="$WATCH_DIR/watch_addresses.json"
+    
+    # 创建目录和文件（如果不存在）
+    mkdir -p "$WATCH_DIR"
+    if [ ! -f "$WATCH_FILE" ]; then
+        echo '{"addresses":[]}' > "$WATCH_FILE"
+    fi
+    
+    while true; do
+        echo -e "\n${YELLOW}>>> 关注地址管理${RESET}"
+        echo "1. 添加关注地址"
+        echo "2. 删除关注地址"
+        echo "3. 查看当前地址"
+        echo "4. 返回主菜单"
+        echo -n "请选择 [1-4]: "
+        read choice
+        
+        case $choice in
+            1)
+                echo -e "\n${YELLOW}>>> 添加关注地址${RESET}"
+                echo -n "请输入Solana地址: "
+                read address
+                echo -n "请输入备注信息: "
+                read note
+                
+                if [ ! -z "$address" ]; then
+                    # 检查地址格式
+                    if [[ ! "$address" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]]; then
+                        echo -e "${RED}无效的Solana地址格式${RESET}"
+                        continue
+                    fi
+                    
+                    # 添加地址
+                    tmp=$(mktemp)
+                    jq --arg addr "$address" --arg note "$note" \
+                        '.addresses += [{"address": $addr, "note": $note}]' \
+                        "$WATCH_FILE" > "$tmp" && mv "$tmp" "$WATCH_FILE"
+                    
+                    echo -e "${GREEN}✓ 地址已添加${RESET}"
+                fi
+                ;;
+            2)
+                addresses=$(jq -r '.addresses[] | "\(.address) (\(.note))"' "$WATCH_FILE")
+                if [ ! -z "$addresses" ]; then
+                    echo -e "\n当前关注地址："
+                    i=1
+                    while IFS= read -r line; do
+                        echo "$i. $line"
+                        i=$((i+1))
+                    done <<< "$addresses"
+                    
+                    echo -e "\n${YELLOW}>>> 请输入要删除的地址编号：${RESET}"
+                    read num
+                    if [[ $num =~ ^[0-9]+$ ]]; then
+                        tmp=$(mktemp)
+                        jq "del(.addresses[$(($num-1))])" "$WATCH_FILE" > "$tmp" \
+                            && mv "$tmp" "$WATCH_FILE"
+                        echo -e "${GREEN}✓ 地址已删除${RESET}"
+                    else
+                        echo -e "${RED}无效的编号${RESET}"
+                    fi
+                else
+                    echo -e "${YELLOW}没有已添加的关注地址${RESET}"
+                fi
+                ;;
+            3)
+                addresses=$(jq -r '.addresses[] | "\(.address) (\(.note))"' "$WATCH_FILE")
+                if [ ! -z "$addresses" ]; then
+                    echo -e "\n当前关注地址："
+                    i=1
+                    while IFS= read -r line; do
+                        echo "$i. $line"
+                        i=$((i+1))
+                    done <<< "$addresses"
+                else
+                    echo -e "${YELLOW}没有已添加的关注地址${RESET}"
+                fi
+                ;;
+            4)
+                return
+                ;;
+            *)
+                echo -e "${RED}无效选项!${RESET}"
+                ;;
+        esac
+    done
+}
+
 #===========================================
 # RPC节点处理模块
 #===========================================
