@@ -353,12 +353,33 @@ def send_test_notification():
 send_test_notification()
 EOF
 }
+
 #===========================================
 # RPC节点管理模块
 #===========================================
 manage_rpc() {
     ANALYSIS_FILE="$HOME/.solana_pump/rpc_analysis.txt"
     mkdir -p "$HOME/.solana_pump"
+    
+    # 默认公共RPC节点列表
+    DEFAULT_RPC_NODES=$(cat << 'EOF'
+https://api.mainnet-beta.solana.com | 0 | Solana | Official Public RPC
+https://solana-api.projectserum.com | 0 | Project Serum | Public RPC
+https://rpc.ankr.com/solana | 0 | Ankr | Public RPC
+https://solana-mainnet.rpc.extrnode.com | 0 | Extrnode | Public RPC
+https://api.mainnet.rpcpool.com | 0 | RPCPool | Public RPC
+https://api.metaplex.solana.com | 0 | Metaplex | Public RPC
+https://api.solscan.io | 0 | Solscan | Public RPC
+https://solana.public-rpc.com | 0 | GenesysGo | Public RPC
+https://ssc-dao.genesysgo.net | 0 | GenesysGo | SSC Public RPC
+https://free.rpcpool.com | 0 | RPCPool | Free Public RPC
+https://api.quicknode.com/solana | 0 | QuickNode | Public RPC
+https://api.triton.one | 0 | Triton | Public RPC
+https://api.syndica.io/access-token/default/rpc | 0 | Syndica | Public RPC
+https://api.devnet.solana.com | 0 | Solana | Devnet RPC
+https://api.testnet.solana.com | 0 | Solana | Testnet RPC
+EOF
+)
     
     # 检查并安装 Solana CLI
     if ! command -v solana &> /dev/null; then
@@ -394,7 +415,7 @@ manage_rpc() {
                 cat > "$ANALYSIS_FILE"
                 
                 if [ -f "$ANALYSIS_FILE" ]; then
-                    "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
+                    python3 "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
                 else
                     echo -e "${RED}>>> 节点列表文件不存在${RESET}"
                 fi
@@ -410,7 +431,7 @@ manage_rpc() {
             3)
                 if [ -f "$RPC_FILE" ]; then
                     echo -e "${YELLOW}>>> 开始测试节点延迟...${RESET}"
-                    "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE.new"
+                    python3 "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE.new"
                     if [ $? -eq 0 ]; then
                         mv "$RPC_FILE.new" "$RPC_FILE"
                     fi
@@ -428,7 +449,7 @@ manage_rpc() {
             5)
                 echo -e "${YELLOW}>>> 使用默认公共RPC节点...${RESET}"
                 echo "$DEFAULT_RPC_NODES" > "$ANALYSIS_FILE"
-                "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
+                python3 "$HOME/.solana_pump/process_rpc.py" "$ANALYSIS_FILE" "$RPC_FILE"
                 ;;
             6)
                 echo -e "${YELLOW}>>> 开始扫描网络节点...${RESET}"
@@ -444,7 +465,7 @@ manage_rpc() {
                     continue
                 fi
                 
-                "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE" --scan-network
+                python3 "$HOME/.solana_pump/process_rpc.py" "$RPC_FILE" "$RPC_FILE" --scan-network
                 ;;
             7)
                 return
