@@ -329,6 +329,12 @@ EOF
 
 # RPC节点管理
 manage_rpc() {
+    # 首先确保目录存在
+    mkdir -p "$HOME/.solana_pump"
+    
+    # 确保Python依赖已安装
+    pip3 install requests urllib3 >/dev/null 2>&1
+    
     while true; do
         echo -e "\n${YELLOW}>>> RPC节点管理${RESET}"
         echo "1. 导入RPC节点列表"
@@ -343,6 +349,9 @@ manage_rpc() {
                 echo -e "${YELLOW}>>> 请粘贴RPC节点列表 (完成后按Ctrl+D)：${RESET}"
                 TMP_FILE=$(mktemp)
                 cat > "$TMP_FILE"
+                
+                # 确保目录存在
+                mkdir -p "$(dirname "$RPC_FILE")"
                 
                 # 生成Python处理脚本
                 cat > "$HOME/.solana_pump/process_rpc.py" << 'EOF'
@@ -540,6 +549,7 @@ EOF
         esac
     done
 }
+
 
 # 生成Python监控脚本
 generate_python_script() {
