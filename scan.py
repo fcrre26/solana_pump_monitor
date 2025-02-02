@@ -102,19 +102,46 @@ def save_providers(providers: List[str]):
 def get_ips(asn: str, config: Dict) -> List[str]:
     """获取指定ASN的IP列表"""
     try:
-        headers = {"Accept": "application/json"}
-        if config.get("ipinfo_token"):
-            headers["Authorization"] = f"Bearer {config['ipinfo_token']}"
+        # 使用RIPEstat API
+        url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+        print(f"[调试] 正在请求: {url}")
+        
+        response = requests.get(url, timeout=10)
+        print(f"[调试] 状态码: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"[错误] API请求失败: HTTP {response.status_code}")
+            print(f"[错误] 响应内容: {response.text}")
+            return []
             
-        url = f"https://ipinfo.io/AS{asn}/json"
-        response = requests.get(url, headers=headers)
         data = response.json()
         
-        if "prefixes" in data:
-            return [prefix["netblock"].split("/")[0] for prefix in data["prefixes"]]
+        if not data.get("data", {}).get("prefixes"):
+            print("[错误] 未找到IP前缀")
+            return []
+            
+        # 获取所有IP前缀
+        prefixes = []
+        for prefix in data["data"]["prefixes"]:
+            if "prefix" in prefix:
+                # 取IP段的第一个IP
+                ip = prefix["prefix"].split("/")[0]
+                prefixes.append(ip)
+        
+        print(f"[信息] 找到 {len(prefixes)} 个IP前缀")
+        return prefixes
+        
+    except requests.exceptions.Timeout:
+        print(f"[错误] 请求超时")
+        return []
+    except requests.exceptions.RequestException as e:
+        print(f"[错误] 请求异常: {e}")
+        return []
+    except json.JSONDecodeError:
+        print(f"[错误] JSON解析失败: {response.text}")
         return []
     except Exception as e:
-        print(f"[错误] 获取IP列表失败: {e}")
+        print(f"[错误] 未知异常: {e}")
         return []
 
 def is_solana_rpc(ip: str) -> bool:
@@ -133,28 +160,26 @@ def is_solana_rpc(ip: str) -> bool:
 def get_ip_info(ip: str, config: Dict) -> Dict:
     """获取IP的地理位置信息"""
     try:
-        headers = {"Accept": "application/json"}
-        if config.get("ipinfo_token"):
-            headers["Authorization"] = f"Bearer {config['ipinfo_token']}"
-            
-        url = f"https://ipinfo.io/{ip}/json"
-        response = requests.get(url, headers=headers)
+        # 使用免费的IP-API
+        url = f"http://ip-api.com/json/{ip}"
+        response = requests.get(url, timeout=5)
         data = response.json()
         
-        if "bogon" in data or "error" in data:
+        if data.get("status") == "success":
+            return {
+                "city": data.get("city", "Unknown"),
+                "region": data.get("regionName", "Unknown"),
+                "country": data.get("country", "Unknown"),
+                "org": data.get("org", "Unknown")
+            }
+        else:
+            print(f"[错误] IP-API返回错误: {data.get('message', '未知错误')}")
             return {
                 "city": "Unknown",
                 "region": "Unknown",
                 "country": "Unknown",
                 "org": "Unknown"
             }
-            
-        return {
-            "city": data.get("city", "Unknown"),
-            "region": data.get("region", "Unknown"),
-            "country": data.get("country", "Unknown"),
-            "org": data.get("org", "Unknown")
-        }
     except Exception as e:
         print(f"[错误] 获取IP信息失败: {e}")
         return {
@@ -420,4 +445,4 @@ def main():
 
 if __name__ == "__main__":
     check_and_install_dependencies()
-    main()
+    main() 
