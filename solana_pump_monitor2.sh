@@ -644,14 +644,12 @@ test_all_nodes() {
     # 按延迟排序并保存结果
     if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
         sort -t"|" -k2 -n "$temp_file" -o "$RPC_FILE"
-    # 保存最佳节点
-    if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
-        # 将节点保存为简单的JSON格式
+        # 保存最佳节点
         nodes=$(awk -F"|" '{print "{\"endpoint\": \""$1"\", \"latency\": "$2"}"}' "$RPC_FILE" | jq -s '.')
         echo "$nodes" > "$PYTHON_RPC"
     else
-        # 使用默认节点
-        echo '[{"endpoint": "https://api.mainnet-beta.solana.com", "latency": 0}]' > "$PYTHON_RPC"
+        # 如果没有可用节点，使用默认节点
+        echo "https://api.mainnet-beta.solana.com" > "$PYTHON_RPC"
     fi
     
     rm -f "$temp_file"
@@ -919,27 +917,21 @@ class TokenMonitor:
     def format_market_cap(self, market_cap):
         """格式化市值显示"""
         return f"${self.format_number(market_cap)}"
-def get_best_rpc(self):
-    """获取最佳RPC节点"""
-    rpc_file = "/root/.solana_pump.rpc"  # 修改为指定路径
-    try:
-        # 检查文件是否存在且非空
-        if not os.path.exists(rpc_file) or os.path.getsize(rpc_file) == 0:
-            logging.error(f"RPC文件 {rpc_file} 不存在或为空")
-            return "https://api.mainnet-beta.solana.com"
+            def get_best_rpc(self):
+        """获取最佳RPC节点"""
+        try:
+            with open(self.rpc_file) as f:
+                rpc_url = f.read().strip()
+                if rpc_url.startswith('https://'):
+                    logging.info(f"使用RPC节点: {rpc_url}")
+                    return rpc_url
+        except Exception as e:
+            logging.error(f"读取RPC文件失败: {e}")
         
-        with open(rpc_file) as f:
-            rpc_url = f.read().strip()
-            if rpc_url.startswith('https://'):
-                logging.info(f"使用RPC节点: {rpc_url}")
-                return rpc_url
-    except Exception as e:
-        logging.error(f"读取RPC文件失败: {e}")
-    
-    # 使用默认RPC
-    default_rpc = "https://api.mainnet-beta.solana.com"
-    logging.info(f"使用默认RPC节点: {default_rpc}")
-    return default_rpc
+        # 使用默认RPC
+        default_rpc = "https://api.mainnet-beta.solana.com"
+        logging.info(f"使用默认RPC节点: {default_rpc}")
+        return default_rpc
 
     def load_watch_addresses(self):
         """加载关注地址"""
@@ -1564,28 +1556,17 @@ class TokenMonitor:
         
         raise Exception("所有API密钥已达到限制")
 
-def get_best_rpc(self):
-    """获取最佳RPC节点"""
-    try:
-        with open(self.rpc_file, 'r') as f:
-            content = f.read().strip()
-            
-            # 尝试解析JSON
-            try:
-                nodes = json.loads(content)
-                if isinstance(nodes, list) and nodes:
-                    return nodes[0]['endpoint'] if isinstance(nodes[0], dict) and 'endpoint' in nodes[0] else nodes[0]
-            except json.JSONDecodeError:
-                # 如果不是JSON,直接使用内容作为RPC节点
-                if content.startswith('http'):
-                    return content
-        
-        # 如果都失败,使用默认RPC
-        raise Exception("无法解析RPC文件")
-    except Exception as e:
-        logging.error(f"获取RPC节点失败: {e}")
-        return "https://api.mainnet-beta.solana.com"
-
+    def get_best_rpc(self):
+        """获取最佳RPC节点"""
+        try:
+            with open(self.rpc_file) as f:
+                nodes = [json.loads(line) for line in f]
+                if not nodes:
+                    raise Exception("没有可用的RPC节点")
+                return nodes[0]['endpoint']
+        except Exception as e:
+            logging.error(f"获取RPC节点失败: {e}")
+            return "https://api.mainnet-beta.solana.com"
 
     def fetch_token_info(self, mint):
         """获取代币详细信息"""
