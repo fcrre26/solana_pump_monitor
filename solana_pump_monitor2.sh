@@ -530,19 +530,18 @@ manage_watch_addresses() {
 #===========================================
 # 全局配置
 RPC_DIR="$HOME/.solana_pump"
-RPC_FILE="$RPC_DIR/rpc.txt"
+RPC_FILE="$RPC_DIR/rpc_list.txt"
 CUSTOM_NODES="$RPC_DIR/custom_nodes.txt"
-BEST_RPC="$RPC_DIR/best_rpc.txt"
 PYTHON_RPC="$HOME/.solana_pump.rpc"
 
-# 状态指示图标 (使用ASCII字符替代emoji)
-STATUS_OK="[OK]"      # 替换 🟢
-STATUS_SLOW="[!!]"    # 替换 🟡
-STATUS_ERROR="[XX]"   # 替换 🔴
+# 状态指示图标
+STATUS_OK="[OK]"
+STATUS_SLOW="[!!]"
+STATUS_ERROR="[XX]"
 
 # 延迟阈值(毫秒)
-LATENCY_GOOD=500    # 良好延迟阈值
-LATENCY_WARN=1000   # 警告延迟阈值
+LATENCY_GOOD=100    # 良好延迟阈值
+LATENCY_WARN=500    # 警告延迟阈值
 
 # 默认RPC节点列表
 DEFAULT_RPC_NODES=(
@@ -559,19 +558,16 @@ DEFAULT_RPC_NODES=(
 # 初始化RPC配置
 init_rpc_config() {
     mkdir -p "$RPC_DIR"
+    touch "$RPC_FILE"
+    touch "$CUSTOM_NODES"
     
     # 确保Python RPC配置文件存在
     if [ ! -f "$PYTHON_RPC" ]; then
         echo "https://api.mainnet-beta.solana.com" > "$PYTHON_RPC"
     fi
-    
-    # 确保其他配置文件存在
-    touch "$RPC_FILE"
-    touch "$CUSTOM_NODES"
-    touch "$BEST_RPC"
 }
 
-# 测试RPC节点延迟和可用性
+# 测试单个RPC节点
 test_rpc_node() {
     local endpoint="$1"
     local timeout=5
@@ -594,6 +590,7 @@ test_rpc_node() {
     # 计算延迟(ms)
     local latency=$(echo "($end_time - $start_time) * 1000" | bc)
     
+    # 验证响应
     if [ ! -z "$response" ] && [[ "$response" == *"result"* ]]; then
         local status
         if (( $(echo "$latency < $LATENCY_GOOD" | bc -l) )); then
@@ -644,9 +641,14 @@ test_all_nodes() {
     # 按延迟排序并保存结果
     if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
         sort -t"|" -k2 -n "$temp_file" -o "$RPC_FILE"
-        # 保存最佳节点
+        
+        # 提取最佳节点并保存
+        best_node=$(head -n 1 "$RPC_FILE" | cut -d"|" -f1)
+        echo "$best_node" > "$PYTHON_RPC"
+        
+        # 保存完整节点信息
         nodes=$(awk -F"|" '{print "{\"endpoint\": \""$1"\", \"latency\": "$2"}"}' "$RPC_FILE" | jq -s '.')
-        echo "$nodes" > "$PYTHON_RPC"
+        echo "$nodes" > "$RPC_DIR/full_rpc_info.json"
     else
         # 如果没有可用节点，使用默认节点
         echo "https://api.mainnet-beta.solana.com" > "$PYTHON_RPC"
@@ -679,13 +681,13 @@ add_custom_node() {
         # 验证节点格式
         if [[ ! "$endpoint" =~ ^https?:// ]]; then
             echo -e "${RED}错误: 无效的节点地址格式，必须以 http:// 或 https:// 开头${RESET}"
-            return
+            return 1
         fi
         
         # 检查是否已存在
         if grep -q "^$endpoint$" "$CUSTOM_NODES" 2>/dev/null; then
             echo -e "${YELLOW}该节点已存在${RESET}"
-            return
+            return 1
         fi
         
         # 测试节点连接
@@ -696,6 +698,7 @@ add_custom_node() {
             test_all_nodes
         else
             echo -e "${RED}✗ 节点连接测试失败${RESET}"
+            return 1
         fi
     fi
 }
@@ -704,7 +707,7 @@ add_custom_node() {
 delete_custom_node() {
     if [ ! -f "$CUSTOM_NODES" ] || [ ! -s "$CUSTOM_NODES" ]; then
         echo -e "${RED}>>> 没有自定义节点${RESET}"
-        return
+        return 1
     fi
     
     echo -e "\n${YELLOW}>>> 当前自定义节点：${RESET}"
@@ -714,7 +717,7 @@ delete_custom_node() {
     
     if [ "$num" = "0" ]; then
         echo -e "${YELLOW}已取消删除${RESET}"
-        return
+        return 0
     fi
     
     if [[ $num =~ ^[0-9]+$ ]]; then
@@ -726,9 +729,11 @@ delete_custom_node() {
             test_all_nodes
         else
             echo -e "${RED}错误: 无效的节点编号${RESET}"
+            return 1
         fi
     else
         echo -e "${RED}错误: 请输入有效的数字${RESET}"
+        return 1
     fi
 }
 
@@ -804,6 +809,7 @@ manage_rpc() {
         esac
     done
 }
+
 
 #===========================================
 # Python监控核心模块
