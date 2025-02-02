@@ -1,7 +1,41 @@
+import sys
+import subprocess
+import pkg_resources
 import requests
 import socket
 import time
-from typing import List, Dict
+import platform
+import json
+import os
+import websocket
+from typing import List, Dict, Tuple
+from subprocess import Popen, PIPE
+
+def check_and_install_dependencies():
+    """检查并安装所需的依赖包"""
+    required_packages = {
+        'requests': 'requests',
+        'websocket-client': 'websocket-client'
+    }
+    
+    installed_packages = {pkg.key for pkg in pkg_resources.working_set}
+    
+    packages_to_install = []
+    for package, pip_name in required_packages.items():
+        if package not in installed_packages:
+            packages_to_install.append(pip_name)
+    
+    if packages_to_install:
+        print("\n[初始化] 正在安装所需依赖...")
+        for package in packages_to_install:
+            print(f"[安装] {package}")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                print(f"[完成] {package} 安装成功")
+            except subprocess.CalledProcessError as e:
+                print(f"[错误] 安装 {package} 失败: {e}")
+                sys.exit(1)
+        print("[完成] 所有依赖安装完成\n")
 
 # ASN映射表
 ASN_MAP = {
@@ -27,31 +61,60 @@ ASN_MAP = {
     "AS-30083-US-VELIA-NET": "30083"
 }
 
+# 配置文件路径
+CONFIG_FILE = 'config.json'
+
+# 默认配置
+DEFAULT_CONFIG = {
+    "ipinfo_token": "",
+    "timeout": 2,
+    "max_retries": 3
+}
+
+def load_config() -> Dict:
+    """加载配置文件"""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+    except:
+        pass
+    return DEFAULT_CONFIG.copy()
+
+def save_config(config: Dict):
+    """保存配置文件"""
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=4)
+
 def load_providers() -> List[str]:
     """从文件加载服务商列表"""
     try:
         with open('providers.txt', 'r') as f:
             return [line.strip() for line in f.readlines() if line.strip()]
     except FileNotFoundError:
-        return []
+        return list(ASN_MAP.keys())  # 如果文件不存在，返回所有支持的服务商
 
 def save_providers(providers: List[str]):
     """保存服务商列表到文件"""
     with open('providers.txt', 'w') as f:
         f.write('\n'.join(providers))
 
-def get_ips(asn: str) -> List[str]:
+def get_ips(asn: str, config: Dict) -> List[str]:
     """获取指定ASN的IP列表"""
     try:
-        url = f"https://ipinfo.io/AS{asn}/json"
         headers = {"Accept": "application/json"}
+        if config.get("ipinfo_token"):
+            headers["Authorization"] = f"Bearer {config['ipinfo_token']}"
+            
+        url = f"https://ipinfo.io/AS{asn}/json"
         response = requests.get(url, headers=headers)
         data = response.json()
+        
         if "prefixes" in data:
             return [prefix["netblock"].split("/")[0] for prefix in data["prefixes"]]
         return []
     except Exception as e:
-        print(f"获取IP列表出错: {e}")
+        print(f"[错误] 获取IP列表失败: {e}")
         return []
 
 def is_solana_rpc(ip: str) -> bool:
@@ -67,13 +130,133 @@ def is_solana_rpc(ip: str) -> bool:
     finally:
         sock.close()
 
-def save_results(results: List[str]):
+def get_ip_info(ip: str, config: Dict) -> Dict:
+    """获取IP的地理位置信息"""
+    try:
+        headers = {"Accept": "application/json"}
+        if config.get("ipinfo_token"):
+            headers["Authorization"] = f"Bearer {config['ipinfo_token']}"
+            
+        url = f"https://ipinfo.io/{ip}/json"
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        if "bogon" in data or "error" in data:
+            return {
+                "city": "Unknown",
+                "region": "Unknown",
+                "country": "Unknown",
+                "org": "Unknown"
+            }
+            
+        return {
+            "city": data.get("city", "Unknown"),
+            "region": data.get("region", "Unknown"),
+            "country": data.get("country", "Unknown"),
+            "org": data.get("org", "Unknown")
+        }
+    except Exception as e:
+        print(f"[错误] 获取IP信息失败: {e}")
+        return {
+            "city": "Unknown",
+            "region": "Unknown",
+            "country": "Unknown",
+            "org": "Unknown"
+        }
+
+def get_latency(ip: str) -> float:
+    """测试IP的延迟"""
+    try:
+        if platform.system().lower() == "windows":
+            cmd = ["ping", "-n", "1", "-w", "2000", ip]
+        else:
+            cmd = ["ping", "-c", "1", "-W", "2", ip]
+            
+        process = Popen(cmd, stdout=PIPE, stderr=PIPE)
+        output, _ = process.communicate()
+        output = output.decode()
+        
+        if platform.system().lower() == "windows":
+            if "平均 = " in output:
+                latency = output.split("平均 = ")[-1].split("ms")[0].strip()
+            elif "Average = " in output:
+                latency = output.split("Average = ")[-1].split("ms")[0].strip()
+            else:
+                return 999.99
+        else:
+            if "min/avg/max" in output:
+                latency = output.split("min/avg/max")[1].split("=")[1].split("/")[1].strip()
+            else:
+                return 999.99
+                
+        return float(latency)
+    except:
+        return 999.99
+
+def test_http_rpc(ip: str) -> Tuple[bool, str]:
+    """测试HTTP RPC连接"""
+    url = f"http://{ip}:8899"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    data = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getHealth"
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=5)
+        if response.status_code == 200 and "result" in response.json():
+            return True, url
+    except:
+        pass
+    return False, ""
+
+def test_ws_rpc(ip: str) -> Tuple[bool, str]:
+    """测试WebSocket RPC连接"""
+    url = f"ws://{ip}:8900"
+    try:
+        ws = websocket.create_connection(url, timeout=5)
+        data = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getHealth"
+        }
+        ws.send(json.dumps(data))
+        result = ws.recv()
+        ws.close()
+        if "result" in json.loads(result):
+            return True, url
+    except:
+        pass
+    return False, ""
+
+def save_results(results: List[Dict]):
     """保存扫描结果到文件"""
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     filename = f"solana_rpc_nodes_{timestamp}.txt"
-    with open(filename, 'w') as f:
-        f.write('\n'.join(results))
-    print(f"\n结果已保存到: {filename}")
+    
+    # 格式化输出
+    formatted_results = []
+    header = f"{'IP':<20} | {'机房':<30} | {'供应商':<15} | {'延迟(ms)':<10} | {'HTTP':<30} | {'WebSocket'}"
+    separator = "-" * len(header)
+    formatted_results.append(header)
+    formatted_results.append(separator)
+    
+    for result in results:
+        location = f"{result['city']}, {result['region']}, {result['country']}"
+        http_url = result.get('http_url', 'N/A')
+        ws_url = result.get('ws_url', 'N/A')
+        line = f"{result['ip']:<20} | {location:<30} | {result['provider']:<15} | {result['latency']:<10.2f} | {http_url:<30} | {ws_url}"
+        formatted_results.append(line)
+    
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(formatted_results))
+        
+    print(f"\n[完成] 扫描结果已保存到: {filename}")
+    print("\n发现的RPC节点:")
+    for line in formatted_results:
+        print(line)
 
 def show_menu():
     """显示主菜单"""
@@ -83,15 +266,43 @@ def show_menu():
     print("3. 查看当前要扫描的服务商")
     print("4. 清空服务商列表")
     print("5. 开始扫描")
-    print("6. 退出")
+    print("6. 配置IPInfo API Token")
+    print("7. 退出")
     print("========================")
 
+def configure_ipinfo():
+    """配置IPInfo API Token"""
+    config = load_config()
+    current_token = config.get("ipinfo_token", "")
+    
+    print("\n=== IPInfo API Token 配置 ===")
+    if current_token:
+        print(f"当前Token: {current_token[:6]}...{current_token[-4:]}")
+    else:
+        print("当前未设置Token")
+        
+    print("\n请输入新的Token (直接回车保持不变，输入'clear'清除):")
+    new_token = input().strip()
+    
+    if new_token.lower() == "clear":
+        config["ipinfo_token"] = ""
+        print("\n[完成] Token已清除")
+    elif new_token:
+        config["ipinfo_token"] = new_token
+        print("\n[完成] Token已更新")
+    else:
+        print("\n[取消] Token保持不变")
+        
+    save_config(config)
+
 def main():
+    config = load_config()
     providers = load_providers()
+    total_found = 0
     
     while True:
         show_menu()
-        choice = input("请选择操作 (1-6): ").strip()
+        choice = input("请选择操作 (1-7): ").strip()
         
         if choice == "1":
             print("\n支持的服务商列表:")
@@ -131,25 +342,76 @@ def main():
                 print("\n请先添加要扫描的服务商")
                 continue
                 
+            if not config.get("ipinfo_token"):
+                print("\n[警告] 未设置IPInfo API Token，可能会受到请求限制")
+                print("建议先配置Token（选项6）再开始扫描")
+                print("是否继续扫描？(y/N)")
+                if input().lower() != 'y':
+                    continue
+                
             results = []
-            print("\n开始扫描...")
-            for provider in providers:
-                print(f"\n正在扫描 {provider}...")
+            print(f"\n[开始] 开始扫描 {len(providers)} 个服务商...")
+            
+            for i, provider in enumerate(providers, 1):
+                print(f"\n[{i}/{len(providers)}] 正在扫描 {provider}...")
                 asn = ASN_MAP[provider]
-                ips = get_ips(asn)
+                
+                print(f"[{provider}] 正在获取IP列表...")
+                ips = get_ips(asn, config)
+                
+                if not ips:
+                    print(f"[{provider}] 未获取到IP列表，跳过")
+                    continue
+                    
+                print(f"[{provider}] 获取到 {len(ips)} 个IP，开始扫描...")
+                provider_found = 0
+                
                 for ip in ips:
                     if is_solana_rpc(ip):
-                        result = f"{provider} - {ip}:8899"
+                        print(f"[发现] {provider} - {ip}:8899")
+                        print(f"[测试] 正在获取节点信息...")
+                        
+                        ip_info = get_ip_info(ip, config)
+                        latency = get_latency(ip)
+                        
+                        print(f"[测试] 正在测试HTTP RPC...")
+                        http_success, http_url = test_http_rpc(ip)
+                        
+                        print(f"[测试] 正在测试WebSocket RPC...")
+                        ws_success, ws_url = test_ws_rpc(ip)
+                        
+                        result = {
+                            "ip": f"{ip}:8899",
+                            "provider": provider,
+                            "city": ip_info["city"],
+                            "region": ip_info["region"],
+                            "country": ip_info["country"],
+                            "latency": latency,
+                            "http_url": http_url if http_success else "不可用",
+                            "ws_url": ws_url if ws_success else "不可用"
+                        }
+                        
                         results.append(result)
-                        print(f"发现RPC节点: {result}")
+                        provider_found += 1
+                        total_found += 1
+                        print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
+                        print(f"[信息] HTTP RPC: {result['http_url']}")
+                        print(f"[信息] WebSocket RPC: {result['ws_url']}")
+                
+                print(f"[{provider}] 扫描完成，发现 {provider_found} 个节点")
                 time.sleep(1)  # 避免请求过快
                 
             if results:
+                print(f"\n[统计] 共发现 {total_found} 个RPC节点")
                 save_results(results)
             else:
-                print("\n未发现可用的RPC节点")
+                print("\n[完成] 未发现可用的RPC节点")
                 
         elif choice == "6":
+            configure_ipinfo()
+            config = load_config()  # 重新加载配置
+            
+        elif choice == "7":
             print("\n感谢使用！")
             break
             
@@ -157,4 +419,5 @@ def main():
             print("\n无效的选择，请重试")
 
 if __name__ == "__main__":
-    main() 
+    check_and_install_dependencies()
+    main()
