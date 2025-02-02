@@ -8,8 +8,10 @@ import requests
 import urllib3
 import traceback
 from datetime import datetime, timezone, timedelta
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from wcferry import Wcf
+from queue import Queue
+from threading import Thread
 
 # 禁用SSL警告
 urllib3.disable_warnings()
@@ -57,15 +59,51 @@ class TokenMonitor:
                     self.request_counts[key] = 0
                     self.last_reset[key] = time.time()
 
-            # 创建线程池
-            self.executor = ThreadPoolExecutor(max_workers=5)
+            # 添加缓存
+            self.cache = {
+                'token_info': {},
+                'creator_history': {},
+                'fund_flow': {}
+            }
+            self.cache_expire = {
+                'token_info': 300,      # 5分钟
+                'creator_history': 1800, # 30分钟
+                'fund_flow': 600        # 10分钟
+            }
             
-            # 缓存已分析的地址
-            self.address_cache = {}
-            self.cache_expire = 3600  # 缓存1小时过期
+            # 增加并行处理配置
+            self.parallel_requests = 20  # 增加到20个并行请求
+            self.block_batch_size = 100  # 每批处理100个区块
+            self.worker_threads = 20     # 增加工作线程
+            
+            # 创建处理队列(增加队列大小)
+            self.tx_queue = Queue(maxsize=1000)
+            self.result_queue = Queue(maxsize=1000)
+            
+            # 创建线程池
+            self.executor = ThreadPoolExecutor(max_workers=self.worker_threads)
+            
+            # 添加监控指标
+            self.metrics = {
+                'processed_blocks': 0,
+                'processed_txs': 0,
+                'missed_blocks': set(),
+                'last_process_time': time.time(),
+                'processing_delays': []
+            }
+            
+            # 启动监控线程
+            Thread(target=self.monitor_metrics, daemon=True).start()
             
             # 初始化RPC节点管理
             self.init_rpc_nodes()
+            
+            # 初始化代理IP池
+            self.proxy_pool = []
+            self.current_proxy = 0
+            
+            # 启动处理线程
+            self.start_worker_threads()
             
             logging.info("TokenMonitor初始化成功")
         except Exception as e:
@@ -89,29 +127,17 @@ class TokenMonitor:
             # Ankr节点
             "https://rpc.ankr.com/solana": {"weight": 1, "fails": 0, "last_used": 0},
             
-            # Triton节点
-            "https://free.rpcpool.com": {"weight": 1, "fails": 0, "last_used": 0},
-            
-            # RpcPool节点
-            "https://mainnet.rpcpool.com": {"weight": 1, "fails": 0, "last_used": 0},
-            "https://api.mainnet.rpcpool.com": {"weight": 1, "fails": 0, "last_used": 0},
-            
-            # Extrnode节点
-            "https://solana-mainnet.rpc.extrnode.com": {"weight": 1, "fails": 0, "last_used": 0},
-            
-            # Solanium节点
-            "https://api.solanium.io": {"weight": 1, "fails": 0, "last_used": 0},
-            
-            # Public RPC节点
-            "https://solana.public-rpc.com": {"weight": 1, "fails": 0, "last_used": 0}
+            # 添加更多备用节点
+            "https://mainnet.rpcpool.com": {"weight": 2, "fails": 0, "last_used": 0},
+            "https://api.mainnet.rpcpool.com": {"weight": 2, "fails": 0, "last_used": 0},
         }
         
-        # 请求限制配置
+        # 优化请求限制
         self.request_limits = {
             "default": {
-                "requests_per_second": 5,
-                "min_interval": 0.2,    # 200ms最小间隔
-                "burst_wait": 15,       # 429错误后等待15秒
+                "requests_per_second": 10,  # 增加每秒请求数
+                "min_interval": 0.1,     # 减少最小间隔
+                "burst_wait": 5,         # 减少等待时间
                 "current_requests": 0,
                 "last_request": 0
             }
@@ -201,45 +227,51 @@ class TokenMonitor:
         limits["last_request"] = current_time
         return True
 
-    def make_rpc_request(self, node, method, params=None):
-        """发送RPC请求，带限制控制"""
-        try:
-            self.check_rate_limit(node)
-            
-            # 获取代理配置
-            proxies = self.get_proxies()
-            
-            response = requests.post(
-                node,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": method,
-                    "params": params or []
-                },
-                proxies=proxies,
-                timeout=3
-            )
-            
-            if response.status_code == 429:
-                # 触发限制，等待并切换节点
-                logging.warning(f"节点 {node} 触发请求限制")
-                time.sleep(self.request_limits[node]["burst_wait"])
-                self.handle_rpc_error(node, "Rate limit exceeded")
-                return None
-                
-            return response
-            
-        except requests.exceptions.ProxyError:
-            logging.error("代理连接错误，尝试直连")
-            # 代理失败时尝试直连
-            return self.make_rpc_request_without_proxy(node, method, params)
-        except Exception as e:
-            self.handle_rpc_error(node, str(e))
+    def get_next_proxy(self):
+        """获取下一个代理配置（每次请求换一个IP）"""
+        if not self.proxy_config['enabled']:
             return None
+            
+        # 这里假设每次调用都会得到一个新的动态IP
+        proxy_url = f"http://{self.proxy_config['username']}:{self.proxy_config['password']}@{self.proxy_config['ip']}:{self.proxy_config['port']}"
+        
+        return {
+            "http": proxy_url,
+            "https": proxy_url
+        }
 
-    def make_rpc_request_without_proxy(self, node, method, params=None):
-        """不使用代理发送RPC请求"""
+    def parallel_rpc_request(self, method, params=None):
+        """并行发送RPC请求到多个节点"""
+        futures = []
+        
+        with ThreadPoolExecutor(max_workers=self.parallel_requests) as executor:
+            # 同时发起多个请求
+            for _ in range(self.parallel_requests):
+                rpc = self.get_best_rpc()
+                proxy = self.get_next_proxy()  # 每个请求使用新的IP
+                
+                future = executor.submit(
+                    self.make_rpc_request,
+                    rpc,
+                    method,
+                    params,
+                    proxy
+                )
+                futures.append(future)
+            
+            # 等待第一个成功的结果
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result and result.status_code == 200:
+                        return result
+                except Exception as e:
+                    continue
+        
+        return None
+
+    def make_rpc_request(self, node, method, params=None, proxy=None):
+        """发送RPC请求，支持指定代理"""
         try:
             self.check_rate_limit(node)
             
@@ -251,19 +283,20 @@ class TokenMonitor:
                     "method": method,
                     "params": params or []
                 },
-                timeout=3
+                proxies=proxy,
+                timeout=3,
+                verify=False
             )
             
             if response.status_code == 429:
                 logging.warning(f"节点 {node} 触发请求限制")
                 time.sleep(self.request_limits[node]["burst_wait"])
-                self.handle_rpc_error(node, "Rate limit exceeded")
                 return None
                 
             return response
             
         except Exception as e:
-            self.handle_rpc_error(node, str(e))
+            logging.warning(f"请求失败: {str(e)}")
             return None
 
     def get_best_rpc(self):
@@ -388,9 +421,9 @@ class TokenMonitor:
         """分析创建者历史记录"""
         try:
             # 检查缓存
-            if creator in self.address_cache:
-                cache_data = self.address_cache[creator]
-                if time.time() - cache_data['timestamp'] < self.cache_expire:
+            if creator in self.cache['creator_history']:
+                cache_data = self.cache['creator_history'][creator]
+                if time.time() - cache_data['timestamp'] < self.cache_expire['creator_history']:
                     logging.info(f"使用缓存的创建者历史: {creator}")
                     return cache_data['history']
             
@@ -430,7 +463,7 @@ class TokenMonitor:
                         })
                 
                 # 缓存结果
-                self.address_cache[creator] = {
+                self.cache['creator_history'][creator] = {
                     'timestamp': time.time(),
                     'history': history
                 }
@@ -654,132 +687,147 @@ class TokenMonitor:
             relations = data["relations"]
             
             msg = [
-                "🔔 发现新代币 (UTC+8)",
-                "━━━━━━━━━━━━━━━━━━━━━━━━",
+                "┏━━━━━━━━━━━━━━━━━━━━━ �� 发现新代币 (UTC+8) ━━━━━━━━━━━━━━━━━━━━━┓",
                 "",
-                "📋 基本信息:",
-                "代币地址:",
+                "📋 基本信息",
+                "┣━ 代币地址:",
                 f"{mint}",
                 "",
-                "创建者:",
-                f"{creator}",
+                f"┣━ 创建者: {creator}",
+                f"┗━ 钱包状态: {'🆕 新钱包' if relations['is_new_wallet'] else '📅 老钱包'} | 钱包年龄: {relations['wallet_age']:.1f} 天",
                 "",
-                f"钱包状态: {'🆕 新钱包' if relations['is_new_wallet'] else '📅 老钱包'}",
-                f"钱包年龄: {relations['wallet_age']:.1f} 天",
-                "",
-                "💰 代币数据:",
-                f"初始市值: ${token_info['market_cap']:,.2f}",
-                f"代币供应量: {token_info['supply']:,.0f}",
-                f"单价: ${token_info['price']:.8f}",
-                f"流动性: {token_info['liquidity']:.2f} SOL",
-                f"持有人数: {token_info['holder_count']}",
-                f"前10持有人占比: {token_info['holder_concentration']:.1f}%"
+                "┏━━━━━━━━━━━━━━━━━━━━━ 💰 代币数据 ━━━━━━━━━━━━━━━━━━━━━┓",
+                f"┃ 代币名称: {token_info['name']:<15} | 代币符号: {token_info['symbol']:<8} | 认证状态: {'✅ 已认证' if token_info['verified'] else '❌ 未认证'} ┃",
+                f"┃ 初始市值: ${format_number(token_info['market_cap']):<12} | 代币供应量: {format_number(token_info['supply']):<8} | 单价: ${token_info['price']:.8f} ┃",
+                f"┃ 流动性: {token_info['liquidity']:.2f} SOL{' '*8} | 持有人数: {token_info['holder_count']:<8} | 前10持有比: {token_info['holder_concentration']:.1f}% ┃",
+                "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+                ""
             ]
 
-            # 添加关注地址信息
-            if creator in self.watch_addresses:
+            # 添加资金追踪信息
+            if relations['related_addresses']:
+                total_transfer = sum(r['amount'] for r in relations['relations'] if r['type'] == 'transfer')
                 msg.extend([
-                    "",
-                    "⭐ 重点关注地址！",
-                    f"备注: {self.watch_addresses[creator]}"
+                    f"💸 资金追踪 (总流入: {total_transfer:.1f} SOL)"
                 ])
 
-            # 添加风险评分
-            risk_level = "高" if relations['risk_score'] >= 70 else "中" if relations['risk_score'] >= 40 else "低"
-            msg.extend([
-                "",
-                "🎯 风险评估:",
-                f"综合风险评分: {relations['risk_score']}/100",
-                f"风险等级: {risk_level}",
-                f"关联地址数: {len(relations['related_addresses'])}"
-            ])
-
-            # 添加高价值关联信息
-            if relations['high_value_relations']:
-                msg.append("\n💎 发现高价值关联方:")
-                for relation in relations['high_value_relations'][:3]:  # 只显示前3个
+                # 处理每条资金链
+                for i, chain in enumerate(relations['high_value_relations'], 1):
+                    total_amount = sum(t['amount'] for t in chain.get('transfers', []))
                     msg.extend([
-                        "关联地址:",
-                        f"{relation['address']}",
-                        f"创建代币总数: {relation['total_created']}",
-                        f"高价值代币数: {len(relation['tokens'])}"
+                        f"┣━ 资金链#{i} ({total_amount:.1f} SOL)"
                     ])
-                    for token in relation['tokens'][:2]:  # 每个地址只显示前2个高价值代币
-                        creation_time = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
+                    
+                    # 记录中转钱包数量
+                    transit_wallets = []
+                    creator_wallets = []
+                    
+                    for transfer in chain.get('transfers', []):
+                        timestamp = datetime.fromtimestamp(transfer['timestamp'], tz=timezone(timedelta(hours=8)))
+                        wallet_label = f"(钱包{chr(65 + len(transit_wallets) + len(creator_wallets))})"
+                        
                         msg.extend([
-                            "代币地址:",
-                            f"{token['mint']}",
-                            f"创建时间: {creation_time.strftime('%Y-%m-%d %H:%M:%S')}",
-                            f"最高市值: ${token['max_market_cap']:,.2f}",
-                            f"当前市值: ${token['current_market_cap']:,.2f}",
-                            ""
+                            f"┃   ⬆️ {transfer['amount']:.1f} SOL ({timestamp.strftime('%m-%d %H:%M')}) | 来自: {transfer['source']} {wallet_label}"
                         ])
+                        
+                        if 'success_tokens' in transfer and transfer['success_tokens']:
+                            token_info = [f"{t['symbol']}(${format_number(t['market_cap'])})" 
+                                        for t in transfer['success_tokens']]
+                            msg.append(f"┃   └─ 创建代币历史: {' '.join(token_info)}")
+                            creator_wallets.append(transfer['source'])
+                        else:
+                            msg.append(f"┃   └─ 中转钱包")
+                            transit_wallets.append(transfer['source'])
+                        msg.append("┃")
 
-            # 添加关联的关注地址信息
-            if relations['watch_hits']:
-                msg.append("\n⚠️ 发现关联的关注地址:")
-                for hit in relations['watch_hits']:
-                    timestamp = datetime.fromtimestamp(hit["timestamp"], tz=timezone(timedelta(hours=8)))
+                    # 添加资金链分析
                     msg.extend([
-                        "地址:",
-                        f"{hit['address']}",
-                        f"备注: {hit['note']}",
-                        f"关联类型: {hit['type']}",
-                        f"交易金额: {hit['amount']:.2f} SOL",
-                        f"交易时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-                        ""
+                        "┃",
+                        "┣━ 链路分析:",
+                        f"┃   • 发现{len(creator_wallets)}个创建者钱包, {len(transit_wallets)}个中转钱包",
+                        f"┃   • 资金流向: {' -> '.join([f'钱包{chr(65+i)}' for i in range(len(transit_wallets) + len(creator_wallets) + 1)])}",
+                        "┃"
                     ])
 
-            # 添加创建者历史记录
+                # 添加总体分析
+                success_creators = len([r for r in relations['high_value_relations'] 
+                                    if any(t['market_cap'] > 10_000_000 for t in r.get('success_tokens', []))])
+                total_market_cap = sum(t['market_cap'] for r in relations['high_value_relations'] 
+                                    for t in r.get('success_tokens', []))
+                
+                msg.extend([
+                    "",
+                    "┏━━━━━━━━━━━━━━━━━━━━━ 💡 资金链分析 ━━━━━━━━━━━━━━━━━━━━━┓",
+                    f"┃ • 追踪到{success_creators}个成功项目创建者 | 资金源总市值: ${format_number(total_market_cap)}{' '*8}┃",
+                    f"┃ • 发现{len(transit_wallets)}个中转钱包 | 最早资金来源于 {min(t['timestamp'] for r in relations['high_value_relations'] for t in r.get('transfers', [])):%m-%d %H:%M}{' '*8}┃",
+                    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+                    "",
+                    "🎯 风险评估",
+                    f"┣━ 风险评分: {relations['risk_score']}/100 | 风险等级: {'高' if relations['risk_score'] >= 70 else '中' if relations['risk_score'] >= 40 else '低'}",
+                    "┣━ 资金来源清晰,可追溯到成功创建者" if creator_wallets else "┣━ 无法追踪到明确的成功创建者",
+                    f"┣━ {'使用多层中转增加追踪难度' if len(transit_wallets) > 2 else '资金路径相对简单'}",
+                    "┗━ 中转钱包无创建代币历史"
+                ])
+
+                # 修改投资建议
+                msg.extend([
+                    "",
+                    "💡 投资建议",
+                    "┣━ ⚠️ 新钱包创建,需谨慎对待",
+                    "┣━ 🌟 资金最终来源为成功代币创建者" if creator_wallets else "┣━ ⚠️ 无明显成功项目背景",
+                    f"┣━ {'⚠️ 使用多层中转钱包,增加风险' if len(transit_wallets) > 2 else '💡 资金路径清晰'}",
+                    "┗━ ❗ 建议谨慎跟踪观察"
+                ])
+
+            # 添加创建者历史
             if history:
                 active_tokens = sum(1 for t in history if t["status"] == "活跃")
                 success_rate = active_tokens / len(history) if history else 0
                 msg.extend([
-                    "",
-                    "📜 创建者历史:",
-                    f"历史代币数: {len(history)}",
-                    f"当前活跃: {active_tokens}",
-                    f"成功率: {success_rate:.1%}",
-                    "",
-                    "最近代币记录:"
+                    "┏━━━━━━━━━━━━━━━━━━━━━ 📜 创建者历史 ━━━━━━━━━━━━━━━━━━━━━┓",
+                    f"┃ 历史代币: {len(history)}个 | 当前活跃: {active_tokens}个 | 成功率: {success_rate:.1%}{' '*20}┃",
+                    "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫"
                 ])
-                for token in sorted(history, key=lambda x: x["timestamp"], reverse=True)[:3]:
+                
+                for i, token in enumerate(sorted(history, key=lambda x: x["timestamp"], reverse=True)[:3], 1):
                     timestamp = datetime.fromtimestamp(token["timestamp"], tz=timezone(timedelta(hours=8)))
-                    msg.extend([
-                        "代币地址:",
-                        f"{token['mint']}",
-                        f"创建时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-                        f"最高市值: ${token['max_market_cap']:,.2f}",
-                        f"当前市值: ${token['current_market_cap']:,.2f}",
-                        f"当前状态: {token['status']}",
-                        ""
-                    ])
+                    msg.append(
+                        f"┃ [{i}] 创建: {timestamp.strftime('%m-%d %H:%M')} | 最高: ${format_number(token['max_market_cap'])} | "
+                        f"当前: ${format_number(token['current_market_cap'])} | 状态: {token['status']}{' '*4}┃"
+                    )
+                msg.append("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛")
+
+            # 添加分析总结
+            if relations['high_value_relations']:
+                success_creators = len([r for r in relations['high_value_relations'] 
+                                    if any(t['market_cap'] > 10_000_000 for t in r.get('success_tokens', []))])
+                total_market_cap = sum(t['market_cap'] for r in relations['high_value_relations'] 
+                                    for t in r.get('success_tokens', []))
+                msg.extend([
+                    "",
+                    "┏━━━━━━━━━━━━━━━━━━━━━ 💡 分析总结 ━━━━━━━━━━━━━━━━━━━━━┓",
+                    f"┃ • 发现{success_creators}个成功项目创建者(>$10M) | 资金源总市值: ${format_number(total_market_cap)}{' '*12}┃",
+                    f"┃ • 风险评分: {relations['risk_score']}/100 | 风险等级: {'高' if relations['risk_score'] >= 70 else '中' if relations['risk_score'] >= 40 else '低'} | 关联地址: {len(relations['related_addresses'])}个{' '*12}┃",
+                    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+                ])
 
             # 添加投资建议
             msg.extend([
-                "💡 投资建议:"
+                "",
+                "💡 投资建议",
+                "┣━ ⚠️ 新钱包创建,需谨慎对待" if relations['is_new_wallet'] else "┣━ 📅 老钱包,历史可查",
+                "┣━ 🌟 资金来源包含多个成功代币创建者" if relations['high_value_relations'] else "┣━ ⚠️ 无明显成功项目背景",
+                f"┣━ 💰 上游最高市值项目: ${format_number(max(t['market_cap'] for r in relations['high_value_relations'] for t in r.get('success_tokens', [0])))} (LUNA)",
+                "┗━ ❗ 建议重点关注此项目" if relations['risk_score'] < 70 and relations['high_value_relations'] else "┗━ ❗ 建议谨慎对待"
             ])
-            if relations['is_new_wallet']:
-                msg.append("• ⚠️ 新钱包创建，需谨慎对待")
-            if relations['high_value_relations']:
-                msg.append("• 🌟 发现高价值关联方，可能是成功团队新项目")
-            if success_rate > 0.5:
-                msg.append("• ✅ 创建者历史表现良好")
-            if relations['risk_score'] >= 70:
-                msg.append("• ❗ 高风险项目，建议谨慎")
-            
+
             # 添加快速链接
             msg.extend([
                 "",
-                "🔗 快速链接:",
-                "Birdeye:",
-                f"https://birdeye.so/token/{mint}",
-                "",
-                "Solscan:",
-                f"https://solscan.io/token/{mint}",
-                "",
-                "创建者:",
-                f"https://solscan.io/account/{creator}",
+                "🔗 快速链接",
+                f"┣━ Birdeye: https://birdeye.so/token/{mint}",
+                f"┣━ Solscan: https://solscan.io/token/{mint}",
+                f"┗━ 创建者: https://solscan.io/account/{creator}",
                 "",
                 f"⏰ 发现时间: {datetime.now(tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)"
             ])
@@ -818,107 +866,181 @@ class TokenMonitor:
                     logging.error(f"WeChatFerry推送失败 ({group['name']}): {str(e)}")
                     logging.error(f"详细错误: {traceback.format_exc()}")
 
+    def start_worker_threads(self):
+        """启动更多工作线程"""
+        # 启动区块处理线程
+        for _ in range(10):
+            Thread(target=self.process_blocks, daemon=True).start()
+        
+        # 启动交易分析线程
+        for _ in range(5):
+            Thread(target=self.process_transactions, daemon=True).start()
+        
+        # 启动结果处理线程
+        for _ in range(3):
+            Thread(target=self.process_results, daemon=True).start()
+
+    def process_blocks(self):
+        """处理区块数据"""
+        while True:
+            try:
+                block_data = self.tx_queue.get()
+                if not block_data:
+                    continue
+                
+                block = block_data.get("result")
+                if not block or "transactions" not in block:
+                    continue
+                
+                for tx in block["transactions"]:
+                    if "transaction" not in tx or "message" not in tx["transaction"]:
+                        continue
+                        
+                    account_keys = tx["transaction"]["message"].get("accountKeys", [])
+                    if self.PUMP_PROGRAM in account_keys:
+                        creator = account_keys[0]
+                        mint = account_keys[4]
+                        self.result_queue.put((mint, creator))
+                        self.metrics['processed_txs'] += 1
+                    
+            except Exception as e:
+                logging.error(f"处理区块失败: {str(e)}")
+                continue
+
+    def process_results(self):
+        """处理分析结果"""
+        while True:
+            try:
+                result = self.result_queue.get()
+                if not result:
+                    continue
+                
+                msg = self.format_alert_message(result)
+                self.send_notification(msg)
+                
+            except Exception as e:
+                logging.error(f"处理结果失败: {str(e)}")
+                continue
+
+    def monitor_metrics(self):
+        """监控处理指标"""
+        while True:
+            try:
+                now = time.time()
+                duration = now - self.metrics['last_process_time']
+                blocks_per_second = self.metrics['processed_blocks'] / duration if duration > 0 else 0
+                txs_per_second = self.metrics['processed_txs'] / duration if duration > 0 else 0
+                avg_delay = sum(self.metrics['processing_delays']) / len(self.metrics['processing_delays']) if self.metrics['processing_delays'] else 0
+                
+                logging.info(f"性能指标 - "
+                            f"区块处理速度: {blocks_per_second:.2f}/s, "
+                            f"交易处理速度: {txs_per_second:.2f}/s, "
+                            f"平均延迟: {avg_delay:.2f}s, "
+                            f"丢失区块: {len(self.metrics['missed_blocks'])}")
+                
+                # 重置计数器
+                self.metrics['processed_blocks'] = 0
+                self.metrics['processed_txs'] = 0
+                self.metrics['last_process_time'] = now
+                self.metrics['processing_delays'] = []
+                
+                # 尝试重新处理丢失的区块
+                if self.metrics['missed_blocks']:
+                    self.retry_missed_blocks()
+                
+                time.sleep(60)  # 每分钟输出一次指标
+                
+            except Exception as e:
+                logging.error(f"监控指标错误: {str(e)}")
+                time.sleep(60)
+
+    def retry_missed_blocks(self):
+        """重试处理丢失的区块"""
+        if not self.metrics['missed_blocks']:
+            return
+        
+        logging.info(f"开始重试处理 {len(self.metrics['missed_blocks'])} 个丢失区块")
+        
+        retry_slots = list(self.metrics['missed_blocks'])
+        self.metrics['missed_blocks'].clear()
+        
+        with ThreadPoolExecutor(max_workers=self.parallel_requests) as executor:
+            futures = []
+            for slot in retry_slots:
+                future = executor.submit(
+                    self.parallel_rpc_request,
+                    "getBlock",
+                    [slot, {"encoding":"json","transactionDetails":"full"}]
+                )
+                futures.append((slot, future))
+            
+            for slot, future in futures:
+                try:
+                    response = future.result()
+                    if response and response.status_code == 200:
+                        self.tx_queue.put(response.json())
+                    else:
+                        self.metrics['missed_blocks'].add(slot)
+                except Exception as e:
+                    self.metrics['missed_blocks'].add(slot)
+                    logging.error(f"重试区块 {slot} 失败: {str(e)}")
+
     def monitor(self):
         """主监控函数"""
         logging.info("监控启动...")
         last_slot = 0
-        PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDfgCcMKJ"
-        retry_count = 0
-        max_retries = 3
+        self.PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDfgCcMKJ"
         
         while True:
             try:
-                rpc = self.get_best_rpc()
-                response = self.make_rpc_request(rpc, "getSlot")
+                start_time = time.time()
                 
+                # 并行请求获取当前slot
+                response = self.parallel_rpc_request("getSlot")
                 if not response:
                     continue
                     
                 current_slot = response.json()["result"]
-                if last_slot == 0:
-                    last_slot = current_slot - 10
+                slots_to_process = range(last_slot + 1, current_slot + 1)
                 
-                for slot in range(last_slot + 1, current_slot + 1):
-                    response = self.make_rpc_request(
-                        rpc, 
-                        "getBlock",
-                        [slot, {"encoding":"json","transactionDetails":"full"}]
-                    )
+                # 分批处理区块
+                for batch_start in range(0, len(slots_to_process), self.block_batch_size):
+                    batch_slots = slots_to_process[batch_start:batch_start + self.block_batch_size]
                     
-                    if not response:
-                        logging.warning(f"获取区块 {slot} 失败，可能是RPC节点问题")
-                        continue
+                    # 并行处理一批区块
+                    with ThreadPoolExecutor(max_workers=self.parallel_requests) as executor:
+                        futures = []
+                        for slot in batch_slots:
+                            future = executor.submit(
+                                self.parallel_rpc_request,
+                                "getBlock",
+                                [slot, {"encoding":"json","transactionDetails":"full"}]
+                            )
+                            futures.append((slot, future))
                         
-                    block = response.json().get("result")
-                    if not block:
-                        logging.warning(f"区块 {slot} 返回为空")
-                        continue
-                        
-                    if "transactions" not in block:
-                        logging.warning(f"区块 {slot} 没有transactions字段")
-                        continue
-                    
-                    total_txs = len(block["transactions"])
-                    pump_txs = 0
-                    
-                    for tx in block["transactions"]:
-                        try:
-                            if "transaction" not in tx or "message" not in tx["transaction"]:
-                                continue
-                                
-                            account_keys = tx["transaction"]["message"].get("accountKeys", [])
-                            if PUMP_PROGRAM in account_keys:
-                                pump_txs += 1
-                                accounts = account_keys
-                                creator = accounts[0]
-                                mint = accounts[4]
-                                
-                                logging.info(f"发现Pump交易: creator={creator}, mint={mint}")
-                                token_info = self.fetch_token_info(mint)
-                                logging.info(f"代币信息: {json.dumps(token_info, indent=2)}")
-                                
-                                if token_info["market_cap"] < 1000:
-                                    logging.info(f"市值过小 (${token_info['market_cap']}), 跳过通知")
-                                    continue
-                                
-                                # 追踪资金来源
-                                funding_chains = self.trace_fund_flow(creator)
-                                if funding_chains:
-                                    logging.info(f"发现 {len(funding_chains)} 条资金链")
-                                    for chain in funding_chains:
-                                        source = chain[0]["source"]
-                                        amount = sum(t["amount"] for t in chain)
-                                        logging.info(f"资金链: {source} -> {creator}, 总额: {amount:.2f} SOL")
-                                
-                                alert_data = {
-                                    "address": mint,
-                                    "creator": creator,
-                                    "initial_market_cap": token_info["market_cap"],
-                                    "liquidity": token_info["liquidity"]
-                                }
-                                
-                                alert_msg = self.format_alert_message(alert_data, funding_chains)
-                                logging.info("\n" + alert_msg)
-                                self.send_notification(alert_msg)
-                                
-                        except Exception as e:
-                            logging.error(f"处理交易失败: {str(e)}")
-                            continue
-                    
-                    logging.info(f"区块 {slot} 处理完成: 总交易数={total_txs}, Pump交易数={pump_txs}")
-                    last_slot = slot
-                    time.sleep(0.2)  # 基本请求间隔
+                        # 使用as_completed快速处理结果
+                        for slot, future in futures:
+                            try:
+                                response = future.result()
+                                if response and response.status_code == 200:
+                                    self.tx_queue.put(response.json())
+                                    self.metrics['processed_blocks'] += 1
+                                else:
+                                    self.metrics['missed_blocks'].add(slot)
+                            except Exception as e:
+                                self.metrics['missed_blocks'].add(slot)
+                                logging.error(f"处理区块 {slot} 失败: {str(e)}")
                 
-                time.sleep(1)  # 主循环间隔
+                # 记录处理延迟
+                process_time = time.time() - start_time
+                self.metrics['processing_delays'].append(process_time)
+                
+                last_slot = current_slot
+                time.sleep(0.02)  # 减少轮询间隔到20ms
                 
             except Exception as e:
-                retry_count += 1
                 logging.error(f"监控循环错误: {str(e)}")
-                logging.error(f"详细错误: {traceback.format_exc()}")
-                if retry_count > max_retries:
-                    logging.error("连续失败次数过多，切换RPC节点...")
-                    retry_count = 0
-                time.sleep(10)
+                time.sleep(1)
 
     def set_proxy(self, ip, port, username, password):
         """设置代理配置"""
@@ -962,10 +1084,21 @@ class TokenMonitor:
 
     def get_proxies(self):
         """获取代理配置"""
-        proxy_url = self.get_proxy_url()
-        if not proxy_url:
+        # 如果代理未启用，直接返回 None (使用本机网络)
+        if not self.proxy_config['enabled']:
             return None
-            
+        
+        # 检查必要的代理配置是否完整
+        if not all([self.proxy_config['ip'], 
+                    self.proxy_config['port'], 
+                    self.proxy_config['username'], 
+                    self.proxy_config['password']]):
+            logging.warning("代理配置不完整，使用本机网络")
+            return None
+        
+        # 构建代理URL
+        proxy_url = f"http://{self.proxy_config['username']}:{self.proxy_config['password']}@{self.proxy_config['ip']}:{self.proxy_config['port']}"
+        
         return {
             "http": proxy_url,
             "https": proxy_url
@@ -976,35 +1109,54 @@ class TokenMonitor:
         try:
             proxies = self.get_proxies()
             if not proxies:
+                logging.info("未配置代理或代理未启用")
                 return False
-                
-            response = requests.get(
-                'https://api.mainnet-beta.solana.com',
-                proxies=proxies,
-                timeout=5
-            )
-            return response.status_code == 200
             
+            test_url = 'https://api.mainnet-beta.solana.com'
+            response = requests.get(
+                test_url,
+                proxies=proxies,
+                timeout=5,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                logging.info("代理连接测试成功")
+                return True
+            else:
+                logging.warning(f"代理连接测试失败: HTTP {response.status_code}")
+                return False
+            
+        except requests.exceptions.ProxyError as e:
+            logging.error(f"代理连接错误: {str(e)}")
+            return False
         except Exception as e:
             logging.error(f"代理测试失败: {str(e)}")
             return False
 
-    def make_request(self, url, headers=None):
+    def make_request(self, url, headers=None, timeout=10):
         """发送HTTP请求（带代理支持）"""
         try:
             proxies = self.get_proxies()
+            if proxies:
+                logging.debug(f"使用代理发送请求: {url}")
+            else:
+                logging.debug(f"使用本机网络发送请求: {url}")
+            
             response = requests.get(
                 url,
                 headers=headers,
                 proxies=proxies,
-                timeout=10
+                timeout=timeout,
+                verify=False  # 如果代理有证书问题，可以禁用验证
             )
             return response
             
-        except requests.exceptions.ProxyError:
-            logging.error("代理连接错误")
-            # 代理失败时尝试直连
-            return requests.get(url, headers=headers, timeout=10)
+        except requests.exceptions.ProxyError as e:
+            logging.error(f"代理连接错误: {str(e)}")
+            # 代理失败时自动切换到本机网络
+            logging.info("自动切换到本机网络重试")
+            return requests.get(url, headers=headers, timeout=timeout)
         except Exception as e:
             logging.error(f"请求失败: {str(e)}")
             return None
@@ -1105,6 +1257,86 @@ class TokenMonitor:
             logging.error(f"检查地址成功代币失败: {str(e)}")
             logging.error(f"详细错误: {traceback.format_exc()}")
             return []
+
+    def get_cached_data(self, cache_type, key):
+        """获取缓存数据"""
+        if key in self.cache[cache_type]:
+            data, timestamp = self.cache[cache_type][key]
+            if time.time() - timestamp < self.cache_expire[cache_type]:
+                return data
+        return None
+
+    def set_cached_data(self, cache_type, key, data):
+        """设置缓存数据"""
+        self.cache[cache_type][key] = (data, time.time())
+
+    def analyze_token(self, mint, creator):
+        """并行分析代币信息"""
+        try:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {
+                    'token_info': executor.submit(self.fetch_token_info, mint),
+                    'creator_history': executor.submit(self.analyze_creator_history, creator),
+                    'fund_flow': executor.submit(self.trace_fund_flow, creator)
+                }
+                
+                results = {
+                    key: future.result() for key, future in futures.items()
+                }
+                
+                return results
+        except Exception as e:
+            logging.error(f"分析代币失败: {str(e)}")
+            return None
+
+    def fetch_token_info(self, mint):
+        """批量获取代币信息"""
+        cached = self.get_cached_data('token_info', mint)
+        if cached:
+            return cached
+        
+        try:
+            headers = {"X-API-KEY": self.get_next_api_key()}
+            params = {
+                "address": mint,
+                "get_metadata": 1,
+                "get_holders": 1,
+                "get_price": 1
+            }
+            
+            response = self.make_request(
+                "https://public-api.birdeye.so/public/multi_tokens",
+                headers=headers,
+                params=params
+            )
+            
+            if response and response.status_code == 200:
+                data = response.json()
+                self.set_cached_data('token_info', mint, data)
+                return data
+            
+        except Exception as e:
+            logging.error(f"获取代币信息失败: {str(e)}")
+        return None
+
+    def process_transactions(self):
+        """处理交易队列"""
+        while True:
+            try:
+                tx_data = self.tx_queue.get()
+                if tx_data is None:
+                    break
+                    
+                mint, creator = tx_data
+                results = self.analyze_token(mint, creator)
+                
+                if results and self.should_notify(results):
+                    msg = self.format_alert_message(results)
+                    self.send_notification(msg)
+                    
+            except Exception as e:
+                logging.error(f"处理交易失败: {str(e)}")
+                continue
 
 if __name__ == "__main__":
     # 配置日志
