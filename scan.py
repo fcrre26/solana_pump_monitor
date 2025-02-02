@@ -25,6 +25,17 @@ def check_and_install_dependencies():
         'psutil': 'psutil'
     }
     
+    try:
+        import pkg_resources
+    except ImportError:
+        print("\n[初始化] 正在安装 setuptools...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "setuptools"])
+            import pkg_resources
+        except Exception as e:
+            print(f"[错误] 安装 setuptools 失败: {e}")
+            sys.exit(1)
+    
     installed_packages = {pkg.key for pkg in pkg_resources.working_set}
     
     packages_to_install = []
@@ -37,11 +48,19 @@ def check_and_install_dependencies():
         for package in packages_to_install:
             print(f"[安装] {package}")
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                # 添加 --user 参数以避免权限问题
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", package])
                 print(f"[完成] {package} 安装成功")
             except subprocess.CalledProcessError as e:
-                print(f"[错误] 安装 {package} 失败: {e}")
-                sys.exit(1)
+                print(f"[错误] 安装 {package} 失败，尝试使用 sudo...")
+                try:
+                    subprocess.check_call(["sudo", sys.executable, "-m", "pip", "install", package])
+                    print(f"[完成] {package} 安装成功")
+                except:
+                    print(f"[错误] 安装 {package} 失败: {e}")
+                    print("[提示] 请手动执行以下命令安装依赖：")
+                    print(f"sudo pip3 install {package}")
+                    sys.exit(1)
         print("[完成] 所有依赖安装完成\n")
 
 # ASN映射表
