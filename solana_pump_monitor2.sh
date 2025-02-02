@@ -644,12 +644,14 @@ test_all_nodes() {
     # 按延迟排序并保存结果
     if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
         sort -t"|" -k2 -n "$temp_file" -o "$RPC_FILE"
-        # 保存最佳节点
-        head -n 1 "$RPC_FILE" | cut -d"|" -f1 > "$PYTHON_RPC"
-        head -n 1 "$RPC_FILE" > "$BEST_RPC"
+    # 保存最佳节点
+    if [ -f "$RPC_FILE" ] && [ -s "$RPC_FILE" ]; then
+        # 将节点保存为简单的JSON格式
+        nodes=$(awk -F"|" '{print "{\"endpoint\": \""$1"\", \"latency\": "$2"}"}' "$RPC_FILE" | jq -s '.')
+        echo "$nodes" > "$PYTHON_RPC"
     else
-        # 如果没有可用节点，使用默认节点
-        echo "https://api.mainnet-beta.solana.com" > "$PYTHON_RPC"
+        # 使用默认节点
+        echo '[{"endpoint": "https://api.mainnet-beta.solana.com", "latency": 0}]' > "$PYTHON_RPC"
     fi
     
     rm -f "$temp_file"
@@ -1562,17 +1564,28 @@ class TokenMonitor:
         
         raise Exception("所有API密钥已达到限制")
 
-    def get_best_rpc(self):
-        """获取最佳RPC节点"""
-        try:
-            with open(self.rpc_file) as f:
-                nodes = [json.loads(line) for line in f]
-                if not nodes:
-                    raise Exception("没有可用的RPC节点")
-                return nodes[0]['endpoint']
-        except Exception as e:
-            logging.error(f"获取RPC节点失败: {e}")
-            return "https://api.mainnet-beta.solana.com"
+def get_best_rpc(self):
+    """获取最佳RPC节点"""
+    try:
+        with open(self.rpc_file, 'r') as f:
+            content = f.read().strip()
+            
+            # 尝试解析JSON
+            try:
+                nodes = json.loads(content)
+                if isinstance(nodes, list) and nodes:
+                    return nodes[0]['endpoint'] if isinstance(nodes[0], dict) and 'endpoint' in nodes[0] else nodes[0]
+            except json.JSONDecodeError:
+                # 如果不是JSON,直接使用内容作为RPC节点
+                if content.startswith('http'):
+                    return content
+        
+        # 如果都失败,使用默认RPC
+        raise Exception("无法解析RPC文件")
+    except Exception as e:
+        logging.error(f"获取RPC节点失败: {e}")
+        return "https://api.mainnet-beta.solana.com"
+
 
     def fetch_token_info(self, mint):
         """获取代币详细信息"""
