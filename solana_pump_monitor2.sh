@@ -923,21 +923,29 @@ class TokenMonitor:
     def format_market_cap(self, market_cap):
         """格式化市值显示"""
         return f"${self.format_number(market_cap)}"
-            def get_best_rpc(self):
-        """获取最佳RPC节点"""
-        try:
-            with open(self.rpc_file) as f:
-                rpc_url = f.read().strip()
-                if rpc_url.startswith('https://'):
-                    logging.info(f"使用RPC节点: {rpc_url}")
-                    return rpc_url
-        except Exception as e:
-            logging.error(f"读取RPC文件失败: {e}")
         
-        # 使用默认RPC
-        default_rpc = "https://api.mainnet-beta.solana.com"
-        logging.info(f"使用默认RPC节点: {default_rpc}")
-        return default_rpc
+def get_best_rpc(self):
+    """获取最佳RPC节点"""
+    try:
+        # 读取RPC配置文件
+        with open(self.rpc_file) as f:
+            data = f.read().strip()
+            try:
+                # 尝试解析JSON格式
+                nodes = json.loads(data)
+                if isinstance(nodes, list) and nodes:
+                    return nodes[0]['endpoint']
+            except json.JSONDecodeError:
+                # 如果不是JSON格式，直接使用文本内容
+                if data.startswith('https://'):
+                    return data.strip()
+        
+        logging.warning(f"RPC配置读取失败，使用默认节点")
+    except Exception as e:
+        logging.error(f"获取RPC节点失败: {e}")
+    
+    # 使用默认节点
+    return "https://api.mainnet-beta.solana.com"
 
     def load_watch_addresses(self):
         """加载关注地址"""
@@ -2101,6 +2109,18 @@ toggle_foreground() {
 
 # 启动监控
 start_monitor() {
+        # 检查RPC配置
+    if [ ! -f "$PYTHON_RPC" ] || [ ! -s "$PYTHON_RPC" ]; then
+        echo -e "${YELLOW}>>> RPC配置不存在或为空，执行RPC测试...${RESET}"
+        test_all_nodes
+    fi
+    
+    # 验证RPC配置
+    if [ ! -f "$PYTHON_RPC" ] || [ ! -s "$PYTHON_RPC" ]; then
+        echo -e "${RED}>>> RPC配置失败，无法启动监控${RESET}"
+        return 1
+    fi
+      
     if [ -f "$PIDFILE" ]; then
         pid=$(cat "$PIDFILE")
         if kill -0 "$pid" 2>/dev/null; then
