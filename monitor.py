@@ -83,27 +83,47 @@ class TokenMonitor:
         
         raise Exception("所有API密钥已达到限制")
 
-    def get_best_rpc(self):
-        """获取最佳RPC节点"""
+def get_best_rpc(self):
+    """获取最佳RPC节点"""
+    # 默认RPC节点列表
+    DEFAULT_NODES = [
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-api.projectserum.com",
+        "https://rpc.ankr.com/solana",
+        "https://solana-mainnet.rpc.extrnode.com"
+    ]
+    
+    try:
+        # 尝试从配置文件读取
+        with open(self.rpc_file) as f:
+            data = f.read().strip()
+            try:
+                nodes = json.loads(data)
+                if isinstance(nodes, list) and nodes:
+                    return nodes[0]['endpoint']
+            except json.JSONDecodeError:
+                if data.startswith('https://'):
+                    return data.strip()
+    except Exception as e:
+        logging.warning(f"读取RPC配置失败: {e}")
+    
+    # 如果配置读取失败，测试所有默认节点
+    for node in DEFAULT_NODES:
         try:
-            with open(self.rpc_file) as f:
-                data = f.read().strip()
-                try:
-                    # 尝试解析JSON格式
-                    nodes = json.loads(data)
-                    if isinstance(nodes, list) and nodes:
-                        return nodes[0]['endpoint']
-                except json.JSONDecodeError:
-                    # 如果不是JSON格式，直接使用文本内容
-                    if data.startswith('https://'):
-                        return data.strip()
-            
-            logging.warning(f"RPC配置读取失败，使用默认节点")
-        except Exception as e:
-            logging.error(f"获取RPC节点失败: {e}")
-        
-        # 使用默认节点
-        return "https://api.mainnet-beta.solana.com"
+            response = requests.post(
+                node,
+                json={"jsonrpc":"2.0","id":1,"method":"getHealth"},
+                timeout=3
+            )
+            if response.status_code == 200:
+                logging.info(f"使用可用节点: {node}")
+                return node
+        except:
+            continue
+    
+    # 如果所有节点都失败，使用第一个默认节点
+    logging.warning("所有节点不可用，使用默认节点")
+    return DEFAULT_NODES[0]
 
     def fetch_token_info(self, mint):
         """获取代币详细信息"""
