@@ -16,6 +16,7 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import psutil
 import multiprocessing
+import logging
 
 def check_and_install_dependencies():
     """检查并安装所需的依赖包"""
@@ -175,6 +176,11 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
     potential_ips = []
     thread_count = get_optimal_thread_count()
     
+    # 跳过IPv6网段
+    if isinstance(network, ipaddress.IPv6Network):
+        logging.info(f"[跳过] IPv6网段 {network}")
+        return []
+    
     # 小网段完整扫描
     if network.prefixlen >= 24:  # /24或更小的网段
         ips = [str(ip) for ip in network.hosts()]
@@ -275,13 +281,14 @@ def get_ips(asn: str, config: Dict) -> List[str]:
         # 获取所有IP前缀并展开
         all_ips = []
         total_prefixes = len(data["data"]["prefixes"])
+        ipv4_prefixes = [p for p in data["data"]["prefixes"] if ":" not in p["prefix"]]  # 过滤出IPv4前缀
         
-        print(f"[信息] 找到 {total_prefixes} 个IP段，正在智能扫描...")
-        for i, prefix in enumerate(data["data"]["prefixes"], 1):
+        print(f"[信息] 找到 {len(ipv4_prefixes)} 个IPv4段，正在智能扫描...")
+        for i, prefix in enumerate(ipv4_prefixes, 1):
             if "prefix" in prefix:
                 try:
                     network = ipaddress.ip_network(prefix["prefix"])
-                    print(f"\n[进度] 正在处理IP段 {i}/{total_prefixes}: {prefix['prefix']}")
+                    print(f"\n[进度] 正在处理IP段 {i}/{len(ipv4_prefixes)}: {prefix['prefix']}")
                     
                     # 扫描网段
                     potential_ips = scan_network(network, asn)
