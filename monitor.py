@@ -42,11 +42,67 @@ class TokenMonitor:
             self.address_cache = {}
             self.cache_expire = 3600  # 缓存1小时过期
             
+            # 初始化RPC节点管理
+            self.init_rpc_nodes()
+            
             logging.info("TokenMonitor初始化成功")
         except Exception as e:
             logging.error(f"TokenMonitor初始化失败: {str(e)}")
             logging.error(f"详细错误: {traceback.format_exc()}")
             raise
+
+    def init_rpc_nodes(self):
+        """初始化RPC节点配置"""
+        self.rpc_nodes = {
+            # 官方节点
+            "https://api.mainnet-beta.solana.com": {"weight": 1, "fails": 0, "last_used": 0},
+            "https://api.metaplex.solana.com": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # Project Serum节点
+            "https://solana-api.projectserum.com": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # GenesysGo节点
+            "https://ssc-dao.genesysgo.net": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # Ankr节点
+            "https://rpc.ankr.com/solana": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # Triton节点
+            "https://free.rpcpool.com": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # RpcPool节点
+            "https://mainnet.rpcpool.com": {"weight": 1, "fails": 0, "last_used": 0},
+            "https://api.mainnet.rpcpool.com": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # Extrnode节点
+            "https://solana-mainnet.rpc.extrnode.com": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # Solanium节点
+            "https://api.solanium.io": {"weight": 1, "fails": 0, "last_used": 0},
+            
+            # Public RPC节点
+            "https://solana.public-rpc.com": {"weight": 1, "fails": 0, "last_used": 0}
+        }
+        
+        # 请求限制配置
+        self.request_limits = {
+            "default": {
+                "requests_per_second": 5,
+                "min_interval": 0.2,    # 200ms最小间隔
+                "burst_wait": 15,       # 429错误后等待15秒
+                "current_requests": 0,
+                "last_request": 0
+            }
+        }
+        
+        # 为每个节点初始化请求计数器
+        for node in self.rpc_nodes:
+            self.request_limits[node] = self.request_limits["default"].copy()
+        
+        self.current_rpc = None
+        self.rpc_switch_interval = 60  # 60秒切换一次节点
+        self.last_rpc_switch = 0
+        self.max_fails = 3  # 最大失败次数
 
     def load_config(self):
         try:
@@ -103,51 +159,118 @@ class TokenMonitor:
             logging.error(f"详细错误: {traceback.format_exc()}")
             raise
 
+    def check_rate_limit(self, node):
+        """检查是否超出请求限制"""
+        current_time = time.time()
+        limits = self.request_limits.get(node, self.request_limits["default"])
+        
+        # 检查最小间隔
+        if current_time - limits["last_request"] < limits["min_interval"]:
+            time.sleep(limits["min_interval"])
+        
+        # 检查每秒请求数
+        if limits["current_requests"] >= limits["requests_per_second"]:
+            sleep_time = 1.0 - (current_time - limits["last_request"])
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            limits["current_requests"] = 0
+        
+        limits["current_requests"] += 1
+        limits["last_request"] = current_time
+        return True
+
+    def make_rpc_request(self, node, method, params=None):
+        """发送RPC请求，带限制控制"""
+        try:
+            self.check_rate_limit(node)
+            
+            response = requests.post(
+                node,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": params or []
+                },
+                timeout=3
+            )
+            
+            if response.status_code == 429:
+                # 触发限制，等待并切换节点
+                logging.warning(f"节点 {node} 触发请求限制")
+                time.sleep(self.request_limits[node]["burst_wait"])
+                self.handle_rpc_error(node, "Rate limit exceeded")
+                return None
+                
+            return response
+            
+        except Exception as e:
+            self.handle_rpc_error(node, str(e))
+            return None
+
     def get_best_rpc(self):
         """获取最佳RPC节点"""
-        # 默认RPC节点列表
-        DEFAULT_NODES = [
-            "https://api.mainnet-beta.solana.com",
-            "https://solana-api.projectserum.com",
-            "https://rpc.ankr.com/solana",
-            "https://solana-mainnet.rpc.extrnode.com"
-        ]
+        current_time = time.time()
         
-        try:
-            # 尝试从配置文件读取
-            with open(self.rpc_file) as f:
-                data = f.read().strip()
-                try:
-                    nodes = json.loads(data)
-                    if isinstance(nodes, list) and nodes:
-                        logging.info(f"使用配置文件中的RPC节点: {nodes[0]['endpoint']}")
-                        return nodes[0]['endpoint']
-                except json.JSONDecodeError:
-                    if data.startswith('https://'):
-                        logging.info(f"使用配置文件中的RPC节点: {data}")
-                        return data.strip()
-        except Exception as e:
-            logging.warning(f"读取RPC配置失败: {str(e)}")
-            logging.warning(f"详细错误: {traceback.format_exc()}")
+        # 检查是否需要切换节点
+        if (self.current_rpc and 
+            self.rpc_nodes[self.current_rpc]["fails"] < self.max_fails and 
+            current_time - self.last_rpc_switch < self.rpc_switch_interval):
+            return self.current_rpc
         
-        # 如果配置读取失败，测试所有默认节点
-        for node in DEFAULT_NODES:
+        # 按权重和失败次数排序节点
+        available_nodes = sorted(
+            self.rpc_nodes.items(),
+            key=lambda x: (x[1]["fails"], -x[1]["weight"], x[1]["last_used"])
+        )
+        
+        # 测试节点直到找到可用的
+        for node, info in available_nodes:
             try:
-                response = requests.post(
-                    node,
-                    json={"jsonrpc":"2.0","id":1,"method":"getHealth"},
-                    timeout=3
-                )
-                if response.status_code == 200:
-                    logging.info(f"使用可用节点: {node}")
+                logging.info(f"测试RPC节点: {node}")
+                response = self.make_rpc_request(node, "getHealth")
+                
+                if response and response.status_code == 200:
+                    # 更新节点状态
+                    self.rpc_nodes[node]["fails"] = 0
+                    self.rpc_nodes[node]["last_used"] = current_time
+                    self.current_rpc = node
+                    self.last_rpc_switch = current_time
+                    
+                    # 测试延迟
+                    start_time = time.time()
+                    self.make_rpc_request(node, "getHealth")
+                    latency = (time.time() - start_time) * 1000
+                    
+                    # 根据延迟调整权重
+                    if latency < 100:
+                        self.rpc_nodes[node]["weight"] += 0.1
+                    elif latency > 500:
+                        self.rpc_nodes[node]["weight"] = max(0.1, self.rpc_nodes[node]["weight"] - 0.1)
+                    
+                    logging.info(f"使用RPC节点: {node} (延迟: {latency:.1f}ms, 权重: {self.rpc_nodes[node]['weight']:.1f})")
                     return node
+                
             except Exception as e:
-                logging.warning(f"测试节点失败 {node}: {str(e)}")
+                logging.warning(f"节点 {node} 测试失败: {str(e)}")
+                self.rpc_nodes[node]["fails"] += 1
                 continue
         
-        # 如果所有节点都失败，使用第一个默认节点
-        logging.warning("所有节点不可用，使用默认节点")
-        return DEFAULT_NODES[0]
+        # 如果所有节点都失败，重置失败计数并返回默认节点
+        for node in self.rpc_nodes:
+            self.rpc_nodes[node]["fails"] = 0
+        
+        default_node = "https://api.mainnet-beta.solana.com"
+        logging.warning(f"所有节点不可用，使用默认节点: {default_node}")
+        return default_node
+
+    def handle_rpc_error(self, node, error):
+        """处理RPC错误"""
+        if node in self.rpc_nodes:
+            self.rpc_nodes[node]["fails"] += 1
+            if self.rpc_nodes[node]["fails"] >= self.max_fails:
+                logging.warning(f"节点 {node} 失败次数过多，将在下次切换节点")
+                self.last_rpc_switch = 0  # 强制下次切换节点
 
     def fetch_token_info(self, mint):
         """获取代币详细信息"""
@@ -618,60 +741,51 @@ class TokenMonitor:
         while True:
             try:
                 rpc = self.get_best_rpc()
-                current_slot = None
+                response = self.make_rpc_request(rpc, "getSlot")
                 
-                # 获取当前区块，带重试
-                for _ in range(max_retries):
-                    try:
-                        response = requests.post(
-                            rpc,
-                            json={"jsonrpc":"2.0","id":1,"method":"getSlot"},
-                            timeout=3
-                        )
-                        if response.status_code == 200:
-                            current_slot = response.json()["result"]
-                            break
-                    except Exception as e:
-                        logging.warning(f"获取区块失败，重试... ({e})")
-                        time.sleep(1)
-                
-                if current_slot is None:
-                    raise Exception("无法获取当前区块")
-                
+                if not response:
+                    continue
+                    
+                current_slot = response.json()["result"]
                 if last_slot == 0:
                     last_slot = current_slot - 10
                 
                 for slot in range(last_slot + 1, current_slot + 1):
-                    block = None
-                    # 获取区块数据，带重试
-                    for _ in range(max_retries):
-                        try:
-                            response = requests.post(
-                                rpc,
-                                json={
-                                    "jsonrpc":"2.0",
-                                    "id":1,
-                                    "method":"getBlock",
-                                    "params":[slot, {"encoding":"json","transactionDetails":"full"}]
-                                },
-                                timeout=5
-                            )
-                            if response.status_code == 200:
-                                block = response.json().get("result")
-                                break
-                        except Exception as e:
-                            logging.warning(f"获取区块 {slot} 失败，重试... ({e})")
-                            time.sleep(1)
+                    response = self.make_rpc_request(
+                        rpc, 
+                        "getBlock",
+                        [slot, {"encoding":"json","transactionDetails":"full"}]
+                    )
                     
-                    if block and "transactions" in block:
-                        logging.info(f"成功解析区块 {slot}, 交易数: {len(block['transactions'])}")
-                        for tx in block["transactions"]:
-                            if PUMP_PROGRAM in tx["transaction"]["message"]["accountKeys"]:
-                                accounts = tx["transaction"]["message"]["accountKeys"]
+                    if not response:
+                        logging.warning(f"获取区块 {slot} 失败，可能是RPC节点问题")
+                        continue
+                        
+                    block = response.json().get("result")
+                    if not block:
+                        logging.warning(f"区块 {slot} 返回为空")
+                        continue
+                        
+                    if "transactions" not in block:
+                        logging.warning(f"区块 {slot} 没有transactions字段")
+                        continue
+                    
+                    total_txs = len(block["transactions"])
+                    pump_txs = 0
+                    
+                    for tx in block["transactions"]:
+                        try:
+                            if "transaction" not in tx or "message" not in tx["transaction"]:
+                                continue
+                                
+                            account_keys = tx["transaction"]["message"].get("accountKeys", [])
+                            if PUMP_PROGRAM in account_keys:
+                                pump_txs += 1
+                                accounts = account_keys
                                 creator = accounts[0]
                                 mint = accounts[4]
                                 
-                                logging.info(f"发现目标交易: creator={creator}, mint={mint}")
+                                logging.info(f"发现Pump交易: creator={creator}, mint={mint}")
                                 token_info = self.fetch_token_info(mint)
                                 logging.info(f"代币信息: {json.dumps(token_info, indent=2)}")
                                 
@@ -693,14 +807,16 @@ class TokenMonitor:
                                 alert_msg = self.format_alert_message(alert_data)
                                 logging.info("\n" + alert_msg)
                                 self.send_notification(alert_msg)
-                    else:
-                        logging.info(f"区块 {slot} 无交易或获取失败")
+                                
+                        except Exception as e:
+                            logging.error(f"处理交易失败: {str(e)}")
+                            continue
                     
+                    logging.info(f"区块 {slot} 处理完成: 总交易数={total_txs}, Pump交易数={pump_txs}")
                     last_slot = slot
-                    time.sleep(0.1)
+                    time.sleep(0.2)  # 基本请求间隔
                 
-                retry_count = 0  # 重置重试计数
-                time.sleep(1)
+                time.sleep(1)  # 主循环间隔
                 
             except Exception as e:
                 retry_count += 1
@@ -714,13 +830,16 @@ class TokenMonitor:
 if __name__ == "__main__":
     # 配置更详细的日志格式
     logging.basicConfig(
-        level=logging.DEBUG,  # 改为DEBUG级别，显示更多信息
-        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+        level=logging.INFO,  # 改回INFO级别
+        format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler('monitor.log'),
             logging.StreamHandler()
         ]
     )
+    
+    # 设置urllib3的日志级别为WARNING
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
     
     # 添加异常处理
     try:
