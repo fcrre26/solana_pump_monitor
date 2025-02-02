@@ -133,41 +133,30 @@ def is_potential_rpc(ip: str) -> bool:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
         result = sock.connect_ex((ip, 8899))
+        sock.close()
+        
+        # 端口不通直接返回False
         if result != 0:
             return False
             
-        # 2. 检查主机名
+        # 2. 快速RPC检查
         try:
-            host_info = socket.gethostbyaddr(ip)
-            host_name = host_info[0].lower()
-            if any(x in host_name for x in ['solana', 'rpc', 'node', 'validator']):
-                print(f"[发现] {ip} 主机名匹配: {host_name}")
+            response = requests.post(
+                f"http://{ip}:8899",
+                json={"jsonrpc": "2.0", "id": 1, "method": "getHealth"},
+                headers={"Content-Type": "application/json"},
+                timeout=2
+            )
+            if response.status_code == 200 and "result" in response.json():
+                print(f"[发现] {ip} RPC接口正常")
                 return True
         except:
             pass
             
-        # 3. 检查组织信息
-        try:
-            ip_info = get_ip_info(ip, {})
-            org = ip_info.get('org', '').lower()
-            if any(x in org for x in ['solana', 'blockchain', 'node', 'validator']):
-                print(f"[发现] {ip} 组织信息匹配: {org}")
-                return True
-        except:
-            pass
-            
-        # 4. 如果端口开放，尝试简单的HTTP头检查
-        try:
-            response = requests.head(f"http://{ip}:8899", timeout=2)
-            if response.headers.get('server', '').lower() in ['nginx', 'solana']:
-                print(f"[发现] {ip} HTTP头匹配")
-                return True
-        except:
-            pass
-            
-        # 5. 如果以上都没匹配，但端口开放，返回True进行进一步检查
+        # 3. 端口开放但RPC检查失败，返回True进行进一步检查
+        print(f"[发现] {ip} 端口开放")
         return True
-        
+            
     except:
         return False
 
@@ -198,9 +187,9 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                         potential_ips.append(ip)
                         print(f"[发现] 发现潜在RPC节点: {ip}")
                 except Exception as e:
-                    print(f"[错误] 扫描IP {ip} 时出错: {e}")
+                    continue
     else:
-        # 大网段采样扫描
+        # 大网段智能扫描
         subnets = list(network.subnets(new_prefix=24))
         print(f"[扫描] 扫描大网段 {network}，分割为 {len(subnets)} 个/24子网")
         
@@ -212,12 +201,10 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                 if not subnet_ips:
                     continue
                     
-                # 取每个/24网段的首、中、尾部IP进行检查
-                sample_ips = [
-                    str(subnet_ips[0]),
-                    str(subnet_ips[len(subnet_ips)//2]),
-                    str(subnet_ips[-1])
-                ]
+                # 智能采样：每个/24网段取10个样本IP
+                sample_count = min(10, len(subnet_ips))
+                step = len(subnet_ips) // sample_count
+                sample_ips = [str(subnet_ips[i]) for i in range(0, len(subnet_ips), step)][:sample_count]
                 
                 # 并行检查采样IP
                 sample_futures = []
@@ -235,7 +222,7 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                             found_rpc = True
                             print(f"[发现] 发现潜在RPC节点: {ip}")
                     except Exception as e:
-                        print(f"[错误] 扫描IP {ip} 时出错: {e}")
+                        continue
                 
                 # 如果在采样IP中发现RPC，扫描整个/24网段
                 if found_rpc:
@@ -254,7 +241,7 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                                 potential_ips.append(ip)
                                 print(f"[发现] 发现潜在RPC节点: {ip}")
                         except Exception as e:
-                            print(f"[错误] 扫描IP {ip} 时出错: {e}")
+                            continue
     
     return potential_ips
 
@@ -425,25 +412,52 @@ def save_results(results: List[Dict]):
     
     # 格式化输出
     formatted_results = []
-    header = f"{'IP':<20} | {'机房':<30} | {'供应商':<15} | {'延迟(ms)':<10} | {'HTTP':<30} | {'WebSocket'}"
-    separator = "-" * len(header)
+    
+    # 添加统计信息
+    formatted_results.append("=== Solana RPC节点扫描结果 ===")
+    formatted_results.append(f"扫描时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    formatted_results.append(f"发现节点: {len(results)} 个")
+    formatted_results.append("")
+    
+    # 按延迟排序
+    results.sort(key=lambda x: x['latency'])
+    
+    # 添加表头
+    header = f"{'序号':<4} | {'IP':<20} | {'延迟(ms)':<8} | {'机房':<15} | {'地区':<15} | {'国家':<10} | {'HTTP地址':<45} | {'WS地址'}"
+    separator = "=" * (len(header) + 20)  # 增加分隔符长度以适应链接地址
     formatted_results.append(header)
     formatted_results.append(separator)
     
-    for result in results:
-        location = f"{result['city']}, {result['region']}, {result['country']}"
-        http_url = result.get('http_url', 'N/A')
-        ws_url = result.get('ws_url', 'N/A')
-        line = f"{result['ip']:<20} | {location:<30} | {result['provider']:<15} | {result['latency']:<10.2f} | {http_url:<30} | {ws_url}"
+    # 添加结果
+    for i, result in enumerate(results, 1):
+        location = f"{result['city']}"
+        region = f"{result['region']}"
+        country = f"{result['country']}"
+        http_url = result['http_url'] if result['http_url'] != "不可用" else "-"
+        ws_url = result['ws_url'] if result['ws_url'] != "不可用" else "-"
+        
+        line = f"{i:<4} | {result['ip']:<20} | {result['latency']:<8.1f} | {location[:15]:<15} | {region[:15]:<15} | {country[:10]:<10} | {http_url:<45} | {ws_url}"
         formatted_results.append(line)
     
+    formatted_results.append(separator)
+    
+    # 添加详细信息
+    formatted_results.append("\n=== 详细信息 ===")
+    for i, result in enumerate(results, 1):
+        formatted_results.append(f"\n节点 {i}:")
+        formatted_results.append(f"IP地址: {result['ip']}")
+        formatted_results.append(f"延迟: {result['latency']:.1f}ms")
+        formatted_results.append(f"位置: {result['city']}, {result['region']}, {result['country']}")
+        formatted_results.append(f"HTTP RPC: {result['http_url']}")
+        formatted_results.append(f"WebSocket: {result['ws_url']}")
+    
+    # 保存到文件
     with open(filename, 'w', encoding='utf-8') as f:
         f.write('\n'.join(formatted_results))
         
-    print(f"\n[完成] 扫描结果已保存到: {filename}")
-    print("\n发现的RPC节点:")
-    for line in formatted_results:
-        print(line)
+    # 打印结果
+    print("\n" + "\n".join(formatted_results[:len(results) + 7]))  # 打印表格部分
+    print(f"\n[完成] 完整结果已保存到: {filename}")
 
 def show_menu():
     """显示主菜单"""
@@ -575,34 +589,42 @@ def get_optimal_thread_count() -> int:
 
 def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
     """扫描单个IP"""
-    if is_solana_rpc(ip):
-        print(f"\n[发现] {provider} - {ip}:8899")
-        print(f"[测试] 正在获取节点信息...")
-        
-        ip_info = get_ip_info(ip, config)
-        latency = get_latency(ip)
-        
-        print(f"[测试] 正在测试HTTP RPC...")
-        http_success, http_url = test_http_rpc(ip)
-        
-        print(f"[测试] 正在测试WebSocket RPC...")
-        ws_success, ws_url = test_ws_rpc(ip)
-        
-        result = {
-            "ip": f"{ip}:8899",
-            "provider": provider,
-            "city": ip_info["city"],
-            "region": ip_info["region"],
-            "country": ip_info["country"],
-            "latency": latency,
-            "http_url": http_url if http_success else "不可用",
-            "ws_url": ws_url if ws_success else "不可用"
-        }
-        
-        print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
-        print(f"[信息] HTTP RPC: {result['http_url']}")
-        print(f"[信息] WebSocket RPC: {result['ws_url']}")
-        return result
+    try:
+        # 1. 检查端口是否开放
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        if sock.connect_ex((ip, 8899)) == 0:
+            sock.close()
+            
+            # 2. 测试RPC功能
+            http_success, http_url = test_http_rpc(ip)
+            if http_success:
+                print(f"\n[发现] {provider} - {ip}:8899")
+                print(f"[测试] 正在获取节点信息...")
+                
+                ip_info = get_ip_info(ip, config)
+                latency = get_latency(ip)
+                
+                print(f"[测试] 正在测试WebSocket RPC...")
+                ws_success, ws_url = test_ws_rpc(ip)
+                
+                result = {
+                    "ip": f"{ip}:8899",
+                    "provider": provider,
+                    "city": ip_info["city"],
+                    "region": ip_info["region"],
+                    "country": ip_info["country"],
+                    "latency": latency,
+                    "http_url": http_url,
+                    "ws_url": ws_url if ws_success else "不可用"
+                }
+                
+                print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
+                print(f"[信息] HTTP RPC: {result['http_url']}")
+                print(f"[信息] WebSocket RPC: {result['ws_url']}")
+                return result
+    except:
+        pass
     return None
 
 def scan_provider(provider: str, config: Dict) -> List[Dict]:
