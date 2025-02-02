@@ -10,12 +10,19 @@ import os
 import websocket
 from typing import List, Dict, Tuple
 from subprocess import Popen, PIPE
+import ipaddress
+import threading
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import psutil
+import multiprocessing
 
 def check_and_install_dependencies():
     """检查并安装所需的依赖包"""
     required_packages = {
         'requests': 'requests',
-        'websocket-client': 'websocket-client'
+        'websocket-client': 'websocket-client',
+        'psutil': 'psutil'
     }
     
     installed_packages = {pkg.key for pkg in pkg_resources.working_set}
@@ -99,10 +106,100 @@ def save_providers(providers: List[str]):
     with open('providers.txt', 'w') as f:
         f.write('\n'.join(providers))
 
+def is_potential_rpc(ip: str) -> bool:
+    """预检查IP是否可能是RPC节点"""
+    try:
+        # 1. 快速TCP SYN检查
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex((ip, 8899))
+        if result != 0:
+            return False
+            
+        # 2. 检查主机名
+        try:
+            host_info = socket.gethostbyaddr(ip)
+            host_name = host_info[0].lower()
+            if any(x in host_name for x in ['solana', 'rpc', 'node', 'validator']):
+                print(f"[发现] {ip} 主机名匹配: {host_name}")
+                return True
+        except:
+            pass
+            
+        # 3. 检查组织信息
+        try:
+            ip_info = get_ip_info(ip, {})
+            org = ip_info.get('org', '').lower()
+            if any(x in org for x in ['solana', 'blockchain', 'node', 'validator']):
+                print(f"[发现] {ip} 组织信息匹配: {org}")
+                return True
+        except:
+            pass
+            
+        # 4. 如果端口开放，尝试简单的HTTP头检查
+        try:
+            response = requests.head(f"http://{ip}:8899", timeout=2)
+            if response.headers.get('server', '').lower() in ['nginx', 'solana']:
+                print(f"[发现] {ip} HTTP头匹配")
+                return True
+        except:
+            pass
+            
+        # 5. 如果以上都没匹配，但端口开放，返回True进行进一步检查
+        return True
+        
+    except:
+        return False
+
+def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
+    """扫描单个网段"""
+    potential_ips = []
+    
+    # 小网段完整扫描
+    if network.prefixlen >= 24:  # /24或更小的网段
+        ips = [str(ip) for ip in network.hosts()]
+        print(f"[扫描] 扫描小网段 {network}，共 {len(ips)} 个IP")
+        for ip in ips:
+            if is_potential_rpc(ip):
+                potential_ips.append(ip)
+                print(f"[发现] 发现潜在RPC节点: {ip}")
+    else:
+        # 大网段采样扫描
+        subnets = list(network.subnets(new_prefix=24))
+        print(f"[扫描] 扫描大网段 {network}，分割为 {len(subnets)} 个/24子网")
+        for subnet in subnets:
+            subnet_ips = list(subnet.hosts())
+            if not subnet_ips:
+                continue
+                
+            # 取每个/24网段的首、中、尾部IP进行检查
+            sample_ips = [
+                str(subnet_ips[0]),
+                str(subnet_ips[len(subnet_ips)//2]),
+                str(subnet_ips[-1])
+            ]
+            
+            found_rpc = False
+            for ip in sample_ips:
+                if is_potential_rpc(ip):
+                    potential_ips.append(ip)
+                    found_rpc = True
+                    print(f"[发现] 发现潜在RPC节点: {ip}")
+                    
+            # 如果在采样IP中发现RPC，扫描整个/24网段
+            if found_rpc:
+                print(f"[扫描] 在{subnet}发现RPC节点，扫描整个子网")
+                for ip in subnet_ips:
+                    ip_str = str(ip)
+                    if ip_str not in potential_ips and is_potential_rpc(ip_str):
+                        potential_ips.append(ip_str)
+                        print(f"[发现] 发现潜在RPC节点: {ip_str}")
+    
+    return potential_ips
+
 def get_ips(asn: str, config: Dict) -> List[str]:
     """获取指定ASN的IP列表"""
     try:
-        # 使用RIPEstat API
         url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
         print(f"[调试] 正在请求: {url}")
         
@@ -120,28 +217,31 @@ def get_ips(asn: str, config: Dict) -> List[str]:
             print("[错误] 未找到IP前缀")
             return []
             
-        # 获取所有IP前缀
-        prefixes = []
-        for prefix in data["data"]["prefixes"]:
+        # 获取所有IP前缀并展开
+        all_ips = []
+        total_prefixes = len(data["data"]["prefixes"])
+        
+        print(f"[信息] 找到 {total_prefixes} 个IP段，正在智能扫描...")
+        for i, prefix in enumerate(data["data"]["prefixes"], 1):
             if "prefix" in prefix:
-                # 取IP段的第一个IP
-                ip = prefix["prefix"].split("/")[0]
-                prefixes.append(ip)
+                try:
+                    network = ipaddress.ip_network(prefix["prefix"])
+                    print(f"\n[进度] 正在处理IP段 {i}/{total_prefixes}: {prefix['prefix']}")
+                    
+                    # 扫描网段
+                    potential_ips = scan_network(network, asn)
+                    all_ips.extend(potential_ips)
+                    
+                    print(f"[统计] 当前共发现 {len(all_ips)} 个潜在RPC节点")
+                except Exception as e:
+                    print(f"[错误] 处理IP段 {prefix['prefix']} 失败: {e}")
+                    continue
         
-        print(f"[信息] 找到 {len(prefixes)} 个IP前缀")
-        return prefixes
+        print(f"\n[信息] 扫描完成，共找到 {len(all_ips)} 个潜在的RPC节点")
+        return all_ips
         
-    except requests.exceptions.Timeout:
-        print(f"[错误] 请求超时")
-        return []
-    except requests.exceptions.RequestException as e:
-        print(f"[错误] 请求异常: {e}")
-        return []
-    except json.JSONDecodeError:
-        print(f"[错误] JSON解析失败: {response.text}")
-        return []
     except Exception as e:
-        print(f"[错误] 未知异常: {e}")
+        print(f"[错误] 获取IP列表失败: {e}")
         return []
 
 def is_solana_rpc(ip: str) -> bool:
@@ -292,7 +392,9 @@ def show_menu():
     print("4. 清空服务商列表")
     print("5. 开始扫描")
     print("6. 快速扫描Vultr")
-    print("7. 退出")
+    print("7. 后台扫描")
+    print("8. 查看扫描进度")
+    print("9. 退出")
     print("========================")
 
 def configure_ipinfo():
@@ -320,6 +422,125 @@ def configure_ipinfo():
         
     save_config(config)
 
+def save_progress(provider: str, scanned: int, total: int, found: int):
+    """保存扫描进度"""
+    progress = {
+        "provider": provider,
+        "scanned": scanned,
+        "total": total,
+        "found": found,
+        "last_update": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    with open("scan_progress.json", "w") as f:
+        json.dump(progress, f)
+
+def load_progress() -> Dict:
+    """加载扫描进度"""
+    try:
+        with open("scan_progress.json", "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def background_scan(provider: str):
+    """后台扫描函数"""
+    cmd = f"nohup python3 {sys.argv[0]} --scan {provider} > scan.log 2>&1 &"
+    subprocess.Popen(cmd, shell=True)
+    print(f"\n[后台] 扫描已启动，使用选项8查看进度")
+    print(f"[后台] 日志文件: scan.log")
+
+def show_progress():
+    """显示扫描进度"""
+    progress = load_progress()
+    if not progress:
+        print("\n[进度] 当前没有正在进行的扫描")
+        return
+        
+    provider = progress["provider"]
+    scanned = progress["scanned"]
+    total = progress["total"]
+    found = progress["found"]
+    last_update = progress["last_update"]
+    
+    print(f"\n[进度] 正在扫描: {provider}")
+    print(f"[进度] 已扫描: {scanned}/{total} ({(scanned/total*100):.1f}%)")
+    print(f"[进度] 已发现: {found} 个节点")
+    print(f"[进度] 最后更新: {last_update}")
+    
+    # 显示最新的日志
+    try:
+        with open("scan.log", "r") as f:
+            lines = f.readlines()
+            if lines:
+                print("\n最新日志:")
+                for line in lines[-5:]:  # 显示最后5行
+                    print(line.strip())
+    except:
+        pass
+
+def get_optimal_thread_count() -> int:
+    """获取最优线程数"""
+    try:
+        # 获取CPU核心数
+        cpu_count = multiprocessing.cpu_count()
+        # 获取可用内存(GB)
+        available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+        
+        # 基础线程数：每个CPU核心2个线程
+        base_threads = cpu_count * 2
+        
+        # 根据可用内存调整
+        # 假设每个线程大约需要50MB内存
+        memory_based_threads = int(available_memory * 1024 / 50)
+        
+        # 取较小值，避免资源耗尽
+        optimal_threads = min(base_threads, memory_based_threads)
+        
+        # 设置上下限
+        optimal_threads = max(5, min(optimal_threads, 100))
+        
+        print(f"[系统] CPU核心数: {cpu_count}")
+        print(f"[系统] 可用内存: {available_memory:.1f}GB")
+        print(f"[系统] 最优线程数: {optimal_threads}")
+        
+        return optimal_threads
+    except:
+        # 如果无法获取系统信息，返回保守的默认值
+        print("[系统] 无法获取系统信息，使用默认线程数: 10")
+        return 10
+
+def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
+    """扫描单个IP"""
+    if is_solana_rpc(ip):
+        print(f"\n[发现] {provider} - {ip}:8899")
+        print(f"[测试] 正在获取节点信息...")
+        
+        ip_info = get_ip_info(ip, config)
+        latency = get_latency(ip)
+        
+        print(f"[测试] 正在测试HTTP RPC...")
+        http_success, http_url = test_http_rpc(ip)
+        
+        print(f"[测试] 正在测试WebSocket RPC...")
+        ws_success, ws_url = test_ws_rpc(ip)
+        
+        result = {
+            "ip": f"{ip}:8899",
+            "provider": provider,
+            "city": ip_info["city"],
+            "region": ip_info["region"],
+            "country": ip_info["country"],
+            "latency": latency,
+            "http_url": http_url if http_success else "不可用",
+            "ws_url": ws_url if ws_success else "不可用"
+        }
+        
+        print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
+        print(f"[信息] HTTP RPC: {result['http_url']}")
+        print(f"[信息] WebSocket RPC: {result['ws_url']}")
+        return result
+    return None
+
 def scan_provider(provider: str, config: Dict) -> List[Dict]:
     """扫描单个服务商"""
     results = []
@@ -327,57 +548,75 @@ def scan_provider(provider: str, config: Dict) -> List[Dict]:
     
     print(f"\n[开始] 正在扫描 {provider}...")
     print(f"[{provider}] 正在获取IP列表...")
-    ips = get_ips(asn, config)
+    potential_ips = get_ips(asn, config)
     
-    if not ips:
-        print(f"[{provider}] 未获取到IP列表，跳过")
+    if not potential_ips:
+        print(f"[{provider}] 未获取到潜在RPC节点，跳过")
         return results
         
-    print(f"[{provider}] 获取到 {len(ips)} 个IP，开始扫描...")
-    provider_found = 0
+    print(f"[{provider}] 获取到 {len(potential_ips)} 个潜在RPC节点，开始详细检查...")
+    total_ips = len(potential_ips)
+    scanned = 0
+    found = 0
     
-    for ip in ips:
-        if is_solana_rpc(ip):
-            print(f"[发现] {provider} - {ip}:8899")
-            print(f"[测试] 正在获取节点信息...")
-            
-            ip_info = get_ip_info(ip, config)
-            latency = get_latency(ip)
-            
-            print(f"[测试] 正在测试HTTP RPC...")
-            http_success, http_url = test_http_rpc(ip)
-            
-            print(f"[测试] 正在测试WebSocket RPC...")
-            ws_success, ws_url = test_ws_rpc(ip)
-            
-            result = {
-                "ip": f"{ip}:8899",
-                "provider": provider,
-                "city": ip_info["city"],
-                "region": ip_info["region"],
-                "country": ip_info["country"],
-                "latency": latency,
-                "http_url": http_url if http_success else "不可用",
-                "ws_url": ws_url if ws_success else "不可用"
-            }
-            
-            results.append(result)
-            provider_found += 1
-            print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
-            print(f"[信息] HTTP RPC: {result['http_url']}")
-            print(f"[信息] WebSocket RPC: {result['ws_url']}")
+    # 获取最优线程数
+    thread_count = get_optimal_thread_count()
+    print(f"[线程] 使用 {thread_count} 个线程进行扫描")
     
-    print(f"[{provider}] 扫描完成，发现 {provider_found} 个节点")
+    # 创建进度更新线程
+    progress_queue = Queue()
+    stop_progress = threading.Event()
+    
+    def update_progress():
+        while not stop_progress.is_set():
+            if not progress_queue.empty():
+                current = progress_queue.get()
+                save_progress(provider, current, total_ips, found)
+                print(f"\r[进度] 正在扫描 {current}/{total_ips} ({(current/total_ips*100):.1f}%)", end="")
+            time.sleep(0.1)
+    
+    progress_thread = threading.Thread(target=update_progress)
+    progress_thread.daemon = True
+    progress_thread.start()
+    
+    # 使用线程池进行扫描
+    with ThreadPoolExecutor(max_workers=thread_count) as executor:
+        future_to_ip = {executor.submit(scan_ip, ip, provider, config): ip for ip in potential_ips}
+        
+        for future in as_completed(future_to_ip):
+            scanned += 1
+            progress_queue.put(scanned)
+            
+            result = future.result()
+            if result:
+                results.append(result)
+                found += 1
+                save_progress(provider, scanned, total_ips, found)
+    
+    # 停止进度更新线程
+    stop_progress.set()
+    progress_thread.join()
+    
+    print(f"\n[{provider}] 扫描完成，发现 {found} 个RPC节点")
     return results
 
 def main():
+    # 处理命令行参数
+    if len(sys.argv) > 1 and sys.argv[1] == "--scan":
+        provider = sys.argv[2]
+        config = load_config()
+        results = scan_provider(provider, config)
+        if results:
+            save_results(results)
+        return
+
     config = load_config()
     providers = load_providers()
     total_found = 0
     
     while True:
         show_menu()
-        choice = input("请选择操作 (1-7): ").strip()
+        choice = input("请选择操作 (1-9): ").strip()
         
         if choice == "1":
             print("\n支持的服务商列表:")
@@ -420,13 +659,19 @@ def main():
             results = []
             print(f"\n[开始] 开始扫描 {len(providers)} 个服务商...")
             
-            for i, provider in enumerate(providers, 1):
-                print(f"\n[{i}/{len(providers)}] 正在扫描 {provider}...")
-                provider_results = scan_provider(provider, config)
-                results.extend(provider_results)
-                total_found += len(provider_results)
-                time.sleep(1)  # 避免请求过快
+            # 获取最优线程数（服务商扫描使用较少线程）
+            thread_count = max(1, get_optimal_thread_count() // 5)
+            print(f"[线程] 使用 {thread_count} 个线程扫描服务商")
+            
+            # 使用线程池扫描多个服务商
+            with ThreadPoolExecutor(max_workers=thread_count) as executor:
+                future_to_provider = {executor.submit(scan_provider, provider, config): provider for provider in providers}
                 
+                for future in as_completed(future_to_provider):
+                    provider_results = future.result()
+                    results.extend(provider_results)
+                    total_found += len(provider_results)
+            
             if results:
                 print(f"\n[统计] 共发现 {total_found} 个RPC节点")
                 save_results(results)
@@ -441,8 +686,28 @@ def main():
                 save_results(results)
             else:
                 print("\n[完成] 未发现可用的RPC节点")
-            
+                
         elif choice == "7":
+            print("\n请选择要后台扫描的服务商:")
+            for i, provider in enumerate(ASN_MAP.keys(), 1):
+                print(f"{i}. {provider}")
+            print("\n输入序号或服务商名称:")
+            choice = input().strip()
+            
+            if choice.isdigit() and 1 <= int(choice) <= len(ASN_MAP):
+                provider = list(ASN_MAP.keys())[int(choice)-1]
+            elif choice in ASN_MAP:
+                provider = choice
+            else:
+                print("\n[错误] 无效的选择")
+                continue
+                
+            background_scan(provider)
+            
+        elif choice == "8":
+            show_progress()
+            
+        elif choice == "9":
             print("\n感谢使用！")
             break
             
