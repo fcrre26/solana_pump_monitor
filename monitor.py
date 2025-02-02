@@ -533,7 +533,7 @@ class TokenMonitor:
                 try:
                     self.wcf.send_text(group["wxid"], msg)
                 except Exception as e:
-                    logging.error(f"WeChatFerry推送失败 ({group['name']}): {e}")
+                    logging.error(f"WeChatFerry推送失败 ({group['name']}): {e}")0
 
     def monitor(self):
         """主监控函数"""
@@ -563,13 +563,26 @@ class TokenMonitor:
                         }, timeout=5).json().get("result")
                         
                         if block and "transactions" in block:
+                            # 添加成功解析区块的日志
+                            logging.info(f"成功解析区块 {slot}, 交易数: {len(block['transactions'])}")
+                            
                             for tx in block["transactions"]:
                                 if PUMP_PROGRAM in tx["transaction"]["message"]["accountKeys"]:
                                     accounts = tx["transaction"]["message"]["accountKeys"]
                                     creator = accounts[0]
                                     mint = accounts[4]
                                     
+                                    # 添加发现目标交易的日志
+                                    logging.info(f"发现目标交易: creator={creator}, mint={mint}")
+                                    
                                     token_info = self.fetch_token_info(mint)
+                                    # 添加代币信息日志
+                                    logging.info(f"代币信息: {json.dumps(token_info, indent=2)}")
+                                    
+                                    if token_info["market_cap"] < 1000:  # 市值太小,不发送通知
+                                        logging.info(f"市值过小 (${token_info['market_cap']}), 跳过通知")
+                                        continue
+                                    
                                     history = self.analyze_creator_history(creator)
                                     relations = self.analyze_creator_relations(creator)
                                     
@@ -584,6 +597,8 @@ class TokenMonitor:
                                     alert_msg = self.format_alert_message(alert_data)
                                     logging.info("\n" + alert_msg)
                                     self.send_notification(alert_msg)
+                        else:
+                            logging.info(f"区块 {slot} 无交易")
                     
                     except Exception as e:
                         logging.error(f"处理区块 {slot} 失败: {e}")
