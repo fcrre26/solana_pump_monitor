@@ -19,6 +19,38 @@ import multiprocessing
 import logging
 import queue
 
+# 添加颜色代码
+class Colors:
+    """终端颜色代码"""
+    HEADER = '\033[95m'      # 紫色
+    OKBLUE = '\033[94m'      # 蓝色
+    OKGREEN = '\033[92m'     # 绿色
+    WARNING = '\033[93m'     # 黄色
+    FAIL = '\033[91m'        # 红色
+    ENDC = '\033[0m'         # 结束颜色
+    BOLD = '\033[1m'         # 加粗
+    UNDERLINE = '\033[4m'    # 下划线
+
+# 添加图标
+class Icons:
+    """Unicode图标"""
+    INFO = "ℹ️ "
+    SUCCESS = "✅ "
+    WARNING = "⚠️ "
+    ERROR = "❌ "
+    SCAN = "🔍 "
+    CPU = "💻 "
+    MEMORY = "💾 "
+    THREAD = "🧵 "
+    SPEED = "⚡ "
+    LOCATION = "📍 "
+    TIME = "⏱️ "
+    STATS = "📊 "
+    NODE = "🖥️ "
+    LATENCY = "📡 "
+    HTTP = "🌐 "
+    WS = "🔌 "
+
 def check_and_install_dependencies():
     """检查并安装所需的依赖包"""
     required_packages = {
@@ -169,14 +201,18 @@ def adjust_thread_count(current_threads: int, target_cpu: float = 80.0) -> int:
     """根据CPU使用率动态调整线程数"""
     cpu_usage = get_cpu_usage()
     
-    # 如果CPU使用率低于目标值,增加线程
-    if cpu_usage < target_cpu - 10:  # 留10%余量
+    # 如果CPU使用率低于目标值,大幅增加线程
+    if cpu_usage < target_cpu - 20:  # CPU利用率过低,激进增加
+        increase = int(current_threads * 0.5)  # 每次增加50%
+        return min(current_threads + max(increase, 50), 5000)
+    # 如果CPU使用率低于目标值但不太低,小幅增加
+    elif cpu_usage < target_cpu - 5:
         increase = int(current_threads * 0.2)  # 每次增加20%
-        return min(current_threads + max(increase, 10), 5000)  # 最多5000线程
+        return min(current_threads + max(increase, 20), 5000)
     # 如果CPU使用率超过目标值,减少线程
-    elif cpu_usage > target_cpu + 5:  # 超过5%就减少
-        decrease = int(current_threads * 0.1)  # 每次减少10%
-        return max(current_threads - decrease, 20)  # 最少20线程
+    elif cpu_usage > target_cpu + 5:
+        decrease = int(current_threads * 0.2)  # 每次减少20%
+        return max(current_threads - decrease, 50)
     return current_threads
 
 def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
@@ -185,14 +221,17 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
     thread_count = get_optimal_thread_count()
     config = load_config()
     
+    # 计算总IP数
+    total_ips = sum(1 for _ in network.hosts())
+    
     # 打印扫描信息
-    print("\n" + "="*50)
-    print(f"[扫描] 开始扫描网段: {network}")
+    print("\n" + "="*70)
+    print(f"[开始] 扫描网段: {network}")
     print(f"[系统] CPU核心数: {multiprocessing.cpu_count()}")
     print(f"[系统] 可用内存: {psutil.virtual_memory().available / (1024*1024*1024):.1f}GB")
     print(f"[系统] 当前CPU使用率: {psutil.cpu_percent()}%")
     print(f"[系统] 初始线程数: {thread_count}")
-    print("="*50 + "\n")
+    print("="*70 + "\n")
     
     # 跳过IPv6网段
     if isinstance(network, ipaddress.IPv6Network):
@@ -214,12 +253,39 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
     thread_lock = threading.Lock()
     counter_lock = threading.Lock()
     
+    # 创建线程列表
+    scan_threads = []
+    verify_threads = []
+    
     def update_progress():
+        """更新进度信息"""
         nonlocal scanned_ips, potential_nodes, verified_nodes_count
         with counter_lock:
             scanned_ips += 1
             if scanned_ips % 100 == 0:  # 每扫描100个IP更新一次进度
-                print(f"\r[进度] 已扫描: {scanned_ips} IP | 发现潜在节点: {potential_nodes} | 已验证可用: {verified_nodes_count} | CPU使用率: {psutil.cpu_percent()}% | 线程数: {thread_count}", end="")
+                cpu_usage = psutil.cpu_percent()
+                memory_usage = psutil.virtual_memory().percent
+                progress = (scanned_ips / total_ips * 100) if total_ips > 0 else 0
+                
+                # 使用简单ASCII字符的进度条
+                bar_width = 50
+                filled = int(bar_width * progress / 100)
+                bar = '#' * filled + '-' * (bar_width - filled)
+                
+                # CPU使用率条
+                cpu_filled = int(bar_width * cpu_usage / 100)
+                cpu_bar = '#' * cpu_filled + '-' * (bar_width - cpu_filled)
+                
+                # 状态信息
+                status = (
+                    f"\r[进度] [{bar}] {progress:.1f}%\n"
+                    f"[CPU ] [{cpu_bar}] {cpu_usage:.1f}%\n"
+                    f"[内存] 使用率: {memory_usage}%\n"
+                    f"[扫描] {scanned_ips}/{total_ips} IP\n"
+                    f"[节点] 发现: {potential_nodes} | 已验证: {verified_nodes_count} | 线程数: {thread_count}\n"
+                    f"{'='*70}"
+                )
+                print(status)
     
     def verify_worker():
         """验证潜在RPC节点的工作线程"""
@@ -232,7 +298,14 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                     verified_queue.put(result)
                     with counter_lock:
                         verified_nodes_count += 1
-                    print(f"\n[验证] 确认可用RPC节点: {ip} | 延迟: {result['latency']:.1f}ms | 位置: {result['city']}, {result['country']}")
+                    print(
+                        f"\n[成功] 发现可用节点: {ip}\n"
+                        f"[延迟] {result['latency']:.1f}ms\n"
+                        f"[位置] {result['city']}, {result['country']}\n"
+                        f"[HTTP] {result['http_url']}\n"
+                        f"[WS  ] {result['ws_url']}\n"
+                        f"{'='*70}"
+                    )
                 potential_queue.task_done()
             except queue.Empty:
                 time.sleep(0.1)
@@ -250,33 +323,46 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                 ips = []
                 for _ in range(20):
                     try:
-                        ips.append(ip_queue.get_nowait())
+                        ip = ip_queue.get_nowait()
+                        ips.append(ip)
                     except queue.Empty:
-                        break
+                        if ips:  # 如果已经获取了一些IP,就处理它们
+                            break
+                        time.sleep(0.01)  # 短暂休眠避免空转
+                        continue
                 
                 if not ips:
-                    break
+                    continue  # 继续尝试获取IP而不是退出
                     
                 # 批量处理IP
                 for ip in ips:
-                    if is_potential_rpc(ip):
-                        with counter_lock:
-                            potential_nodes += 1
-                        potential_queue.put(ip)
-                    ip_queue.task_done()
-                    update_progress()
-                    
-            except queue.Empty:
-                break
+                    try:
+                        if is_potential_rpc(ip):
+                            with counter_lock:
+                                potential_nodes += 1
+                            potential_queue.put(ip)
+                    except Exception as e:
+                        print(f"[错误] 处理IP {ip} 失败: {e}")
+                    finally:
+                        ip_queue.task_done()
+                        update_progress()
+                        
             except Exception as e:
-                for _ in range(len(ips)):
-                    ip_queue.task_done()
+                print(f"[错误] 扫描线程异常: {e}")
                 continue
     
     def thread_manager():
         """管理线程数量"""
-        nonlocal thread_count
+        nonlocal thread_count, scan_threads
+        last_adjust_time = time.time()
+        min_adjust_interval = 2  # 最小调整间隔(秒)
+        
         while not stop_event.is_set():
+            current_time = time.time()
+            if current_time - last_adjust_time < min_adjust_interval:
+                time.sleep(0.1)
+                continue
+            
             new_thread_count = adjust_thread_count(thread_count)
             
             # 如果需要增加线程
@@ -286,17 +372,17 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
                         t = threading.Thread(target=scan_worker)
                         t.daemon = True
                         t.start()
-                        threads.append(t)
-                    print(f"[线程] 增加到 {new_thread_count} 个线程")
+                        scan_threads.append(t)
+                    print(f"[线程] 增加到 {new_thread_count} 个线程 | CPU: {psutil.cpu_percent()}%")
                     thread_count = new_thread_count
             
             # 如果需要减少线程,通过自然结束来实现
             elif new_thread_count < thread_count:
                 thread_count = new_thread_count
-                print(f"[线程] 减少到 {new_thread_count} 个线程")
+                print(f"[线程] 减少到 {new_thread_count} 个线程 | CPU: {psutil.cpu_percent()}%")
             
-            # 每5秒检查一次
-            time.sleep(5)
+            last_adjust_time = current_time
+            time.sleep(1)  # 控制检查频率
     
     # 小网段完整扫描
     if network.prefixlen >= 24:
@@ -313,7 +399,6 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
         manager.start()
         
         # 启动验证线程
-        verify_threads = []
         verify_thread_count = max(10, thread_count // 5)  # 验证线程数为扫描线程的1/5
         for _ in range(verify_thread_count):
             t = threading.Thread(target=verify_worker)
@@ -326,7 +411,7 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
             t = threading.Thread(target=scan_worker)
             t.daemon = True
             t.start()
-            threads.append(t)
+            scan_threads.append(t)
         
         # 等待所有IP处理完成
         ip_queue.join()
@@ -398,7 +483,7 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
             t = threading.Thread(target=subnet_worker)
             t.daemon = True
             t.start()
-            threads.append(t)
+            scan_threads.append(t)
         
         # 等待所有子网处理完成
         subnet_queue.join()
@@ -413,13 +498,13 @@ def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
         verified_nodes.append(result)
     
     # 扫描完成后的统计信息
-    print("\n" + "="*50)
+    print("\n" + "="*70)
     print(f"[完成] 网段扫描完成: {network}")
     print(f"[统计] 总计扫描IP: {scanned_ips}")
     print(f"[统计] 发现潜在节点: {potential_nodes}")
     print(f"[统计] 验证可用节点: {verified_nodes_count}")
     print(f"[系统] 最终CPU使用率: {psutil.cpu_percent()}%")
-    print("="*50 + "\n")
+    print("="*70 + "\n")
     
     return verified_nodes
 
@@ -610,6 +695,24 @@ def test_ws_rpc(ip: str) -> Tuple[bool, str]:
     except:
         return False, ""
 
+def print_status(msg: str, status: str = "info", end: str = "\n"):
+    """打印带颜色和图标的状态信息"""
+    status_formats = {
+        "info": (Colors.OKBLUE, Icons.INFO),
+        "success": (Colors.OKGREEN, Icons.SUCCESS),
+        "warning": (Colors.WARNING, Icons.WARNING),
+        "error": (Colors.FAIL, Icons.ERROR),
+        "scan": (Colors.OKBLUE, Icons.SCAN),
+        "system": (Colors.HEADER, Icons.CPU),
+        "thread": (Colors.OKBLUE, Icons.THREAD),
+        "stats": (Colors.OKGREEN, Icons.STATS),
+        "node": (Colors.OKGREEN, Icons.NODE),
+        "progress": (Colors.WARNING, Icons.SPEED),
+    }
+    
+    color, icon = status_formats.get(status, (Colors.ENDC, ""))
+    print(f"{color}{icon}{msg}{Colors.ENDC}", end=end)
+
 def save_results(results: List[Dict]):
     """保存扫描结果到文件"""
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -619,17 +722,17 @@ def save_results(results: List[Dict]):
     formatted_results = []
     
     # 添加统计信息
-    formatted_results.append("=== Solana RPC节点扫描结果 ===")
-    formatted_results.append(f"扫描时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    formatted_results.append(f"发现节点: {len(results)} 个")
+    formatted_results.append(f"{Icons.STATS} === Solana RPC节点扫描结果 ===")
+    formatted_results.append(f"{Icons.TIME} 扫描时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    formatted_results.append(f"{Icons.NODE} 发现节点: {len(results)} 个")
     formatted_results.append("")
     
     # 按延迟排序
     results.sort(key=lambda x: x['latency'])
     
     # 添加表头
-    header = f"{'序号':<4} | {'IP':<20} | {'延迟(ms)':<8} | {'机房':<15} | {'地区':<15} | {'国家':<10} | {'HTTP地址':<45} | {'WS地址'}"
-    separator = "=" * (len(header) + 20)  # 增加分隔符长度以适应链接地址
+    header = f"{Colors.BOLD}{'序号':<4} | {'IP':<20} | {'延迟(ms)':<8} | {'机房':<15} | {'地区':<15} | {'国家':<10} | {'HTTP地址':<45} | {'WS地址'}{Colors.ENDC}"
+    separator = "=" * (len(header) + 20)
     formatted_results.append(header)
     formatted_results.append(separator)
     
@@ -641,28 +744,42 @@ def save_results(results: List[Dict]):
         http_url = result['http_url'] if result['http_url'] != "不可用" else "-"
         ws_url = result['ws_url'] if result['ws_url'] != "不可用" else "-"
         
-        line = f"{i:<4} | {result['ip']:<20} | {result['latency']:<8.1f} | {location[:15]:<15} | {region[:15]:<15} | {country[:10]:<10} | {http_url:<45} | {ws_url}"
+        # 根据延迟添加颜色
+        if result['latency'] < 100:
+            latency_color = Colors.OKGREEN
+        elif result['latency'] < 200:
+            latency_color = Colors.WARNING
+        else:
+            latency_color = Colors.FAIL
+            
+        line = (
+            f"{i:<4} | {result['ip']:<20} | "
+            f"{latency_color}{result['latency']:<8.1f}{Colors.ENDC} | "
+            f"{location[:15]:<15} | {region[:15]:<15} | {country[:10]:<10} | "
+            f"{Colors.OKBLUE}{http_url:<45}{Colors.ENDC} | "
+            f"{Colors.OKBLUE}{ws_url}{Colors.ENDC}"
+        )
         formatted_results.append(line)
     
     formatted_results.append(separator)
     
     # 添加详细信息
-    formatted_results.append("\n=== 详细信息 ===")
+    formatted_results.append(f"\n{Icons.STATS} === 详细信息 ===")
     for i, result in enumerate(results, 1):
-        formatted_results.append(f"\n节点 {i}:")
-        formatted_results.append(f"IP地址: {result['ip']}")
-        formatted_results.append(f"延迟: {result['latency']:.1f}ms")
-        formatted_results.append(f"位置: {result['city']}, {result['region']}, {result['country']}")
-        formatted_results.append(f"HTTP RPC: {result['http_url']}")
-        formatted_results.append(f"WebSocket: {result['ws_url']}")
+        formatted_results.append(f"\n{Icons.NODE} 节点 {i}:")
+        formatted_results.append(f"{Icons.NODE} IP地址: {result['ip']}")
+        formatted_results.append(f"{Icons.LATENCY} 延迟: {result['latency']:.1f}ms")
+        formatted_results.append(f"{Icons.LOCATION} 位置: {result['city']}, {result['region']}, {result['country']}")
+        formatted_results.append(f"{Icons.HTTP} HTTP RPC: {result['http_url']}")
+        formatted_results.append(f"{Icons.WS} WebSocket: {result['ws_url']}")
     
     # 保存到文件
     with open(filename, 'w', encoding='utf-8') as f:
         f.write('\n'.join(formatted_results))
         
     # 打印结果
-    print("\n" + "\n".join(formatted_results[:len(results) + 7]))  # 打印表格部分
-    print(f"\n[完成] 完整结果已保存到: {filename}")
+    print("\n" + "\n".join(formatted_results[:len(results) + 7]))
+    print_status(f"\n完整结果已保存到: {filename}", "success")
 
 def show_menu():
     """显示主菜单"""
@@ -767,20 +884,20 @@ def get_optimal_thread_count() -> int:
         # 获取可用内存(GB)
         available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)
         
-        # 基础线程数：每个CPU核心8个线程
-        base_threads = cpu_count * 8
+        # 基础线程数：每个CPU核心20个线程
+        base_threads = cpu_count * 20
         
         # 根据可用内存调整
-        # 假设每个线程大约需要20MB内存
-        memory_based_threads = int(available_memory * 1024 / 20)
+        # 假设每个线程大约需要10MB内存
+        memory_based_threads = int(available_memory * 1024 / 10)
         
         # 取较大值，允许更多线程
         optimal_threads = max(base_threads, memory_based_threads)
         
         # 调整上下限
-        # 最小20个线程
-        # 最大1000个线程
-        optimal_threads = max(20, min(optimal_threads, 1000))
+        # 最小50个线程
+        # 最大5000个线程
+        optimal_threads = max(50, min(optimal_threads, 5000))
         
         print(f"[系统] CPU核心数: {cpu_count}")
         print(f"[系统] 可用内存: {available_memory:.1f}GB")
@@ -788,9 +905,8 @@ def get_optimal_thread_count() -> int:
         
         return optimal_threads
     except:
-        # 如果无法获取系统信息，返回默认值100
-        print("[系统] 无法获取系统信息，使用默认线程数: 100")
-        return 100
+        print("[系统] 无法获取系统信息，使用默认线程数: 200")
+        return 200
 
 def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
     """扫描单个IP"""
