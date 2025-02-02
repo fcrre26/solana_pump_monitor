@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import psutil
 import multiprocessing
 import logging
+import queue
 
 def check_and_install_dependencies():
     """检查并安装所需的依赖包"""
@@ -160,90 +161,267 @@ def is_potential_rpc(ip: str) -> bool:
     except:
         return False
 
+def get_cpu_usage() -> float:
+    """获取当前CPU使用率"""
+    return psutil.cpu_percent(interval=1)
+
+def adjust_thread_count(current_threads: int, target_cpu: float = 80.0) -> int:
+    """根据CPU使用率动态调整线程数"""
+    cpu_usage = get_cpu_usage()
+    
+    # 如果CPU使用率低于目标值,增加线程
+    if cpu_usage < target_cpu - 10:  # 留10%余量
+        increase = int(current_threads * 0.2)  # 每次增加20%
+        return min(current_threads + max(increase, 10), 5000)  # 最多5000线程
+    # 如果CPU使用率超过目标值,减少线程
+    elif cpu_usage > target_cpu + 5:  # 超过5%就减少
+        decrease = int(current_threads * 0.1)  # 每次减少10%
+        return max(current_threads - decrease, 20)  # 最少20线程
+    return current_threads
+
 def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
     """扫描单个网段"""
-    potential_ips = []
+    verified_nodes = []
     thread_count = get_optimal_thread_count()
+    config = load_config()
+    
+    # 打印扫描信息
+    print("\n" + "="*50)
+    print(f"[扫描] 开始扫描网段: {network}")
+    print(f"[系统] CPU核心数: {multiprocessing.cpu_count()}")
+    print(f"[系统] 可用内存: {psutil.virtual_memory().available / (1024*1024*1024):.1f}GB")
+    print(f"[系统] 当前CPU使用率: {psutil.cpu_percent()}%")
+    print(f"[系统] 初始线程数: {thread_count}")
+    print("="*50 + "\n")
     
     # 跳过IPv6网段
     if isinstance(network, ipaddress.IPv6Network):
         logging.info(f"[跳过] IPv6网段 {network}")
         return []
     
-    # 小网段完整扫描
-    if network.prefixlen >= 24:  # /24或更小的网段
-        ips = [str(ip) for ip in network.hosts()]
-        print(f"[扫描] 扫描小网段 {network}，共 {len(ips)} 个IP，使用 {thread_count} 个线程")
-        
-        # 使用线程池扫描IP
-        with ThreadPoolExecutor(max_workers=thread_count) as executor:
-            futures = []
-            for ip in ips:
-                futures.append(executor.submit(is_potential_rpc, ip))
+    # 创建IP队列和结果队列
+    ip_queue = Queue(maxsize=10000)
+    potential_queue = Queue()
+    verified_queue = Queue()
+    
+    # 创建计数器
+    scanned_ips = 0
+    potential_nodes = 0
+    verified_nodes_count = 0
+    
+    # 创建线程管理事件和锁
+    stop_event = threading.Event()
+    thread_lock = threading.Lock()
+    counter_lock = threading.Lock()
+    
+    def update_progress():
+        nonlocal scanned_ips, potential_nodes, verified_nodes_count
+        with counter_lock:
+            scanned_ips += 1
+            if scanned_ips % 100 == 0:  # 每扫描100个IP更新一次进度
+                print(f"\r[进度] 已扫描: {scanned_ips} IP | 发现潜在节点: {potential_nodes} | 已验证可用: {verified_nodes_count} | CPU使用率: {psutil.cpu_percent()}% | 线程数: {thread_count}", end="")
+    
+    def verify_worker():
+        """验证潜在RPC节点的工作线程"""
+        nonlocal verified_nodes_count
+        while not stop_event.is_set():
+            try:
+                ip = potential_queue.get_nowait()
+                result = scan_ip(ip, provider, config)
+                if result:
+                    verified_queue.put(result)
+                    with counter_lock:
+                        verified_nodes_count += 1
+                    print(f"\n[验证] 确认可用RPC节点: {ip} | 延迟: {result['latency']:.1f}ms | 位置: {result['city']}, {result['country']}")
+                potential_queue.task_done()
+            except queue.Empty:
+                time.sleep(0.1)
+                continue
+            except Exception as e:
+                potential_queue.task_done()
+                continue
+    
+    def scan_worker():
+        """扫描IP的工作线程"""
+        nonlocal potential_nodes
+        while not stop_event.is_set():
+            try:
+                # 批量获取IP进行处理
+                ips = []
+                for _ in range(20):
+                    try:
+                        ips.append(ip_queue.get_nowait())
+                    except queue.Empty:
+                        break
+                
+                if not ips:
+                    break
+                    
+                # 批量处理IP
+                for ip in ips:
+                    if is_potential_rpc(ip):
+                        with counter_lock:
+                            potential_nodes += 1
+                        potential_queue.put(ip)
+                    ip_queue.task_done()
+                    update_progress()
+                    
+            except queue.Empty:
+                break
+            except Exception as e:
+                for _ in range(len(ips)):
+                    ip_queue.task_done()
+                continue
+    
+    def thread_manager():
+        """管理线程数量"""
+        nonlocal thread_count
+        while not stop_event.is_set():
+            new_thread_count = adjust_thread_count(thread_count)
             
-            for ip, future in zip(ips, futures):
-                try:
-                    if future.result():
-                        potential_ips.append(ip)
-                        print(f"[发现] 发现潜在RPC节点: {ip}")
-                except Exception as e:
-                    continue
+            # 如果需要增加线程
+            if new_thread_count > thread_count:
+                with thread_lock:
+                    for _ in range(new_thread_count - thread_count):
+                        t = threading.Thread(target=scan_worker)
+                        t.daemon = True
+                        t.start()
+                        threads.append(t)
+                    print(f"[线程] 增加到 {new_thread_count} 个线程")
+                    thread_count = new_thread_count
+            
+            # 如果需要减少线程,通过自然结束来实现
+            elif new_thread_count < thread_count:
+                thread_count = new_thread_count
+                print(f"[线程] 减少到 {new_thread_count} 个线程")
+            
+            # 每5秒检查一次
+            time.sleep(5)
+    
+    # 小网段完整扫描
+    if network.prefixlen >= 24:
+        ips = [str(ip) for ip in network.hosts()]
+        print(f"[扫描] 扫描小网段 {network}，共 {len(ips)} 个IP，初始 {thread_count} 个线程")
+        
+        # 将所有IP加入队列
+        for ip in ips:
+            ip_queue.put(ip)
+        
+        # 启动线程管理器
+        manager = threading.Thread(target=thread_manager)
+        manager.daemon = True
+        manager.start()
+        
+        # 启动验证线程
+        verify_threads = []
+        verify_thread_count = max(10, thread_count // 5)  # 验证线程数为扫描线程的1/5
+        for _ in range(verify_thread_count):
+            t = threading.Thread(target=verify_worker)
+            t.daemon = True
+            t.start()
+            verify_threads.append(t)
+        
+        # 创建初始扫描线程
+        for _ in range(thread_count):
+            t = threading.Thread(target=scan_worker)
+            t.daemon = True
+            t.start()
+            threads.append(t)
+        
+        # 等待所有IP处理完成
+        ip_queue.join()
+        potential_queue.join()
+        
     else:
-        # 大网段智能扫描
+        # 大网段并行扫描
         subnets = list(network.subnets(new_prefix=24))
         print(f"[扫描] 扫描大网段 {network}，分割为 {len(subnets)} 个/24子网")
         
-        # 对每个子网进行采样
-        with ThreadPoolExecutor(max_workers=thread_count) as executor:
-            subnet_futures = []
-            for subnet in subnets:
-                subnet_ips = list(subnet.hosts())
-                if not subnet_ips:
-                    continue
-                    
-                # 智能采样：每个/24网段取10个样本IP
-                sample_count = min(10, len(subnet_ips))
-                step = len(subnet_ips) // sample_count
-                sample_ips = [str(subnet_ips[i]) for i in range(0, len(subnet_ips), step)][:sample_count]
-                
-                # 并行检查采样IP
-                sample_futures = []
-                for ip in sample_ips:
-                    sample_futures.append(executor.submit(is_potential_rpc, ip))
-                subnet_futures.append((subnet, sample_ips, sample_futures))
-            
-            # 处理采样结果
-            for subnet, sample_ips, sample_futures in subnet_futures:
-                found_rpc = False
-                for ip, future in zip(sample_ips, sample_futures):
-                    try:
-                        if future.result():
-                            potential_ips.append(ip)
-                            found_rpc = True
-                            print(f"[发现] 发现潜在RPC节点: {ip}")
-                    except Exception as e:
-                        continue
-                
-                # 如果在采样IP中发现RPC，扫描整个/24网段
-                if found_rpc:
-                    print(f"[扫描] 在{subnet}发现RPC节点，扫描整个子网")
-                    subnet_ips = [str(ip) for ip in subnet.hosts()]
-                    
-                    # 并行扫描整个子网
-                    full_scan_futures = []
-                    for ip in subnet_ips:
-                        if ip not in potential_ips:  # 跳过已知的IP
-                            full_scan_futures.append(executor.submit(is_potential_rpc, ip))
-                    
-                    for ip, future in zip([ip for ip in subnet_ips if ip not in potential_ips], full_scan_futures):
+        # 创建子网处理队列
+        subnet_queue = Queue()
+        for subnet in subnets:
+            subnet_queue.put(subnet)
+        
+        def subnet_worker():
+            while not stop_event.is_set():
+                try:
+                    # 批量处理子网
+                    subnets_to_process = []
+                    for _ in range(5):
                         try:
-                            if future.result():
-                                potential_ips.append(ip)
+                            subnets_to_process.append(subnet_queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    
+                    if not subnets_to_process:
+                        break
+                        
+                    for subnet in subnets_to_process:
+                        subnet_ips = list(subnet.hosts())
+                        
+                        # 增加采样密度
+                        sample_count = min(50, len(subnet_ips))
+                        step = max(1, len(subnet_ips) // sample_count)
+                        sample_ips = [str(subnet_ips[i]) for i in range(0, len(subnet_ips), step)][:sample_count]
+                        
+                        # 并行扫描采样IP
+                        for ip in sample_ips:
+                            if is_potential_rpc(ip):
                                 print(f"[发现] 发现潜在RPC节点: {ip}")
-                        except Exception as e:
-                            continue
+                                potential_queue.put(ip)
+                        
+                        subnet_queue.task_done()
+                        
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    for _ in range(len(subnets_to_process)):
+                        subnet_queue.task_done()
+                    continue
+        
+        # 启动线程管理器
+        manager = threading.Thread(target=thread_manager)
+        manager.daemon = True
+        manager.start()
+        
+        # 启动验证线程
+        verify_threads = []
+        verify_thread_count = max(10, thread_count // 5)
+        for _ in range(verify_thread_count):
+            t = threading.Thread(target=verify_worker)
+            t.daemon = True
+            t.start()
+            verify_threads.append(t)
+        
+        # 创建初始子网工作线程
+        for _ in range(thread_count):
+            t = threading.Thread(target=subnet_worker)
+            t.daemon = True
+            t.start()
+            threads.append(t)
+        
+        # 等待所有子网处理完成
+        subnet_queue.join()
+        potential_queue.join()
     
-    return potential_ips
+    # 停止所有线程
+    stop_event.set()
+    
+    # 收集验证结果
+    while not verified_queue.empty():
+        result = verified_queue.get()
+        verified_nodes.append(result)
+    
+    # 扫描完成后的统计信息
+    print("\n" + "="*50)
+    print(f"[完成] 网段扫描完成: {network}")
+    print(f"[统计] 总计扫描IP: {scanned_ips}")
+    print(f"[统计] 发现潜在节点: {potential_nodes}")
+    print(f"[统计] 验证可用节点: {verified_nodes_count}")
+    print(f"[系统] 最终CPU使用率: {psutil.cpu_percent()}%")
+    print("="*50 + "\n")
+    
+    return verified_nodes
 
 def get_ips(asn: str, config: Dict) -> List[str]:
     """获取指定ASN的IP列表"""
@@ -373,37 +551,64 @@ def test_http_rpc(ip: str) -> Tuple[bool, str]:
     headers = {
         "Content-Type": "application/json"
     }
-    data = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getHealth"
-    }
+    # 测试多个RPC方法确保节点真正可用
+    test_methods = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getHealth"
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "getVersion"
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "getSlot"
+        }
+    ]
+    
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=5)
-        if response.status_code == 200 and "result" in response.json():
-            return True, url
+        for method in test_methods:
+            response = requests.post(url, headers=headers, json=method, timeout=5)
+            if response.status_code != 200 or "result" not in response.json():
+                return False, ""
+        return True, url
     except:
-        pass
-    return False, ""
+        return False, ""
 
 def test_ws_rpc(ip: str) -> Tuple[bool, str]:
     """测试WebSocket RPC连接"""
     url = f"ws://{ip}:8900"
     try:
         ws = websocket.create_connection(url, timeout=5)
-        data = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getHealth"
-        }
-        ws.send(json.dumps(data))
-        result = ws.recv()
+        # 测试多个RPC方法
+        test_methods = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getHealth"
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "getVersion"
+            }
+        ]
+        
+        for method in test_methods:
+            ws.send(json.dumps(method))
+            result = ws.recv()
+            if "result" not in json.loads(result):
+                ws.close()
+                return False, ""
+                
         ws.close()
-        if "result" in json.loads(result):
-            return True, url
+        return True, url
     except:
-        pass
-    return False, ""
+        return False, ""
 
 def save_results(results: List[Dict]):
     """保存扫描结果到文件"""
@@ -562,20 +767,20 @@ def get_optimal_thread_count() -> int:
         # 获取可用内存(GB)
         available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)
         
-        # 基础线程数：每个CPU核心4个线程（原来是2个）
-        base_threads = cpu_count * 4
+        # 基础线程数：每个CPU核心8个线程
+        base_threads = cpu_count * 8
         
         # 根据可用内存调整
-        # 假设每个线程大约需要30MB内存（原来是50MB）
-        memory_based_threads = int(available_memory * 1024 / 30)
+        # 假设每个线程大约需要20MB内存
+        memory_based_threads = int(available_memory * 1024 / 20)
         
-        # 取较大值，允许更多线程（原来是取较小值）
+        # 取较大值，允许更多线程
         optimal_threads = max(base_threads, memory_based_threads)
         
         # 调整上下限
-        # 最小10个线程（原来是5个）
-        # 最大500个线程（原来是100个）
-        optimal_threads = max(10, min(optimal_threads, 500))
+        # 最小20个线程
+        # 最大1000个线程
+        optimal_threads = max(20, min(optimal_threads, 1000))
         
         print(f"[系统] CPU核心数: {cpu_count}")
         print(f"[系统] 可用内存: {available_memory:.1f}GB")
@@ -583,9 +788,9 @@ def get_optimal_thread_count() -> int:
         
         return optimal_threads
     except:
-        # 如果无法获取系统信息，返回默认值50（原来是10）
-        print("[系统] 无法获取系统信息，使用默认线程数: 50")
-        return 50
+        # 如果无法获取系统信息，返回默认值100
+        print("[系统] 无法获取系统信息，使用默认线程数: 100")
+        return 100
 
 def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
     """扫描单个IP"""
@@ -598,15 +803,23 @@ def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
             
             # 2. 测试RPC功能
             http_success, http_url = test_http_rpc(ip)
-            if http_success:
+            if http_success:  # 只有HTTP RPC可用才继续
                 print(f"\n[发现] {provider} - {ip}:8899")
                 print(f"[测试] 正在获取节点信息...")
                 
                 ip_info = get_ip_info(ip, config)
                 latency = get_latency(ip)
                 
+                # 延迟太高的节点不要
+                if latency > 500:  # 延迟超过500ms不收录
+                    return None
+                
                 print(f"[测试] 正在测试WebSocket RPC...")
                 ws_success, ws_url = test_ws_rpc(ip)
+                
+                # 至少HTTP或WS其中一个要可用
+                if not (http_success or ws_success):
+                    return None
                 
                 result = {
                     "ip": f"{ip}:8899",
@@ -615,7 +828,7 @@ def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
                     "region": ip_info["region"],
                     "country": ip_info["country"],
                     "latency": latency,
-                    "http_url": http_url,
+                    "http_url": http_url if http_success else "不可用",
                     "ws_url": ws_url if ws_success else "不可用"
                 }
                 
