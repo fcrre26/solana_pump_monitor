@@ -291,7 +291,7 @@ def show_menu():
     print("3. 查看当前要扫描的服务商")
     print("4. 清空服务商列表")
     print("5. 开始扫描")
-    print("6. 配置IPInfo API Token")
+    print("6. 快速扫描Vultr")
     print("7. 退出")
     print("========================")
 
@@ -319,6 +319,56 @@ def configure_ipinfo():
         print("\n[取消] Token保持不变")
         
     save_config(config)
+
+def scan_provider(provider: str, config: Dict) -> List[Dict]:
+    """扫描单个服务商"""
+    results = []
+    asn = ASN_MAP[provider]
+    
+    print(f"\n[开始] 正在扫描 {provider}...")
+    print(f"[{provider}] 正在获取IP列表...")
+    ips = get_ips(asn, config)
+    
+    if not ips:
+        print(f"[{provider}] 未获取到IP列表，跳过")
+        return results
+        
+    print(f"[{provider}] 获取到 {len(ips)} 个IP，开始扫描...")
+    provider_found = 0
+    
+    for ip in ips:
+        if is_solana_rpc(ip):
+            print(f"[发现] {provider} - {ip}:8899")
+            print(f"[测试] 正在获取节点信息...")
+            
+            ip_info = get_ip_info(ip, config)
+            latency = get_latency(ip)
+            
+            print(f"[测试] 正在测试HTTP RPC...")
+            http_success, http_url = test_http_rpc(ip)
+            
+            print(f"[测试] 正在测试WebSocket RPC...")
+            ws_success, ws_url = test_ws_rpc(ip)
+            
+            result = {
+                "ip": f"{ip}:8899",
+                "provider": provider,
+                "city": ip_info["city"],
+                "region": ip_info["region"],
+                "country": ip_info["country"],
+                "latency": latency,
+                "http_url": http_url if http_success else "不可用",
+                "ws_url": ws_url if ws_success else "不可用"
+            }
+            
+            results.append(result)
+            provider_found += 1
+            print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
+            print(f"[信息] HTTP RPC: {result['http_url']}")
+            print(f"[信息] WebSocket RPC: {result['ws_url']}")
+    
+    print(f"[{provider}] 扫描完成，发现 {provider_found} 个节点")
+    return results
 
 def main():
     config = load_config()
@@ -367,63 +417,14 @@ def main():
                 print("\n请先添加要扫描的服务商")
                 continue
                 
-            if not config.get("ipinfo_token"):
-                print("\n[警告] 未设置IPInfo API Token，可能会受到请求限制")
-                print("建议先配置Token（选项6）再开始扫描")
-                print("是否继续扫描？(y/N)")
-                if input().lower() != 'y':
-                    continue
-                
             results = []
             print(f"\n[开始] 开始扫描 {len(providers)} 个服务商...")
             
             for i, provider in enumerate(providers, 1):
                 print(f"\n[{i}/{len(providers)}] 正在扫描 {provider}...")
-                asn = ASN_MAP[provider]
-                
-                print(f"[{provider}] 正在获取IP列表...")
-                ips = get_ips(asn, config)
-                
-                if not ips:
-                    print(f"[{provider}] 未获取到IP列表，跳过")
-                    continue
-                    
-                print(f"[{provider}] 获取到 {len(ips)} 个IP，开始扫描...")
-                provider_found = 0
-                
-                for ip in ips:
-                    if is_solana_rpc(ip):
-                        print(f"[发现] {provider} - {ip}:8899")
-                        print(f"[测试] 正在获取节点信息...")
-                        
-                        ip_info = get_ip_info(ip, config)
-                        latency = get_latency(ip)
-                        
-                        print(f"[测试] 正在测试HTTP RPC...")
-                        http_success, http_url = test_http_rpc(ip)
-                        
-                        print(f"[测试] 正在测试WebSocket RPC...")
-                        ws_success, ws_url = test_ws_rpc(ip)
-                        
-                        result = {
-                            "ip": f"{ip}:8899",
-                            "provider": provider,
-                            "city": ip_info["city"],
-                            "region": ip_info["region"],
-                            "country": ip_info["country"],
-                            "latency": latency,
-                            "http_url": http_url if http_success else "不可用",
-                            "ws_url": ws_url if ws_success else "不可用"
-                        }
-                        
-                        results.append(result)
-                        provider_found += 1
-                        total_found += 1
-                        print(f"[信息] {ip}:8899 - {ip_info['city']}, {ip_info['region']}, {ip_info['country']} - {latency:.2f}ms")
-                        print(f"[信息] HTTP RPC: {result['http_url']}")
-                        print(f"[信息] WebSocket RPC: {result['ws_url']}")
-                
-                print(f"[{provider}] 扫描完成，发现 {provider_found} 个节点")
+                provider_results = scan_provider(provider, config)
+                results.extend(provider_results)
+                total_found += len(provider_results)
                 time.sleep(1)  # 避免请求过快
                 
             if results:
@@ -433,8 +434,13 @@ def main():
                 print("\n[完成] 未发现可用的RPC节点")
                 
         elif choice == "6":
-            configure_ipinfo()
-            config = load_config()  # 重新加载配置
+            print("\n[快速扫描] 开始扫描Vultr...")
+            results = scan_provider("Vultr", config)
+            if results:
+                print(f"\n[统计] 共发现 {len(results)} 个RPC节点")
+                save_results(results)
+            else:
+                print("\n[完成] 未发现可用的RPC节点")
             
         elif choice == "7":
             print("\n感谢使用！")
