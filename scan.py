@@ -173,46 +173,82 @@ def is_potential_rpc(ip: str) -> bool:
 def scan_network(network: ipaddress.IPv4Network, provider: str) -> List[str]:
     """扫描单个网段"""
     potential_ips = []
+    thread_count = get_optimal_thread_count()
     
     # 小网段完整扫描
     if network.prefixlen >= 24:  # /24或更小的网段
         ips = [str(ip) for ip in network.hosts()]
-        print(f"[扫描] 扫描小网段 {network}，共 {len(ips)} 个IP")
-        for ip in ips:
-            if is_potential_rpc(ip):
-                potential_ips.append(ip)
-                print(f"[发现] 发现潜在RPC节点: {ip}")
+        print(f"[扫描] 扫描小网段 {network}，共 {len(ips)} 个IP，使用 {thread_count} 个线程")
+        
+        # 使用线程池扫描IP
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            futures = []
+            for ip in ips:
+                futures.append(executor.submit(is_potential_rpc, ip))
+            
+            for ip, future in zip(ips, futures):
+                try:
+                    if future.result():
+                        potential_ips.append(ip)
+                        print(f"[发现] 发现潜在RPC节点: {ip}")
+                except Exception as e:
+                    print(f"[错误] 扫描IP {ip} 时出错: {e}")
     else:
         # 大网段采样扫描
         subnets = list(network.subnets(new_prefix=24))
         print(f"[扫描] 扫描大网段 {network}，分割为 {len(subnets)} 个/24子网")
-        for subnet in subnets:
-            subnet_ips = list(subnet.hosts())
-            if not subnet_ips:
-                continue
-                
-            # 取每个/24网段的首、中、尾部IP进行检查
-            sample_ips = [
-                str(subnet_ips[0]),
-                str(subnet_ips[len(subnet_ips)//2]),
-                str(subnet_ips[-1])
-            ]
-            
-            found_rpc = False
-            for ip in sample_ips:
-                if is_potential_rpc(ip):
-                    potential_ips.append(ip)
-                    found_rpc = True
-                    print(f"[发现] 发现潜在RPC节点: {ip}")
+        
+        # 对每个子网进行采样
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            subnet_futures = []
+            for subnet in subnets:
+                subnet_ips = list(subnet.hosts())
+                if not subnet_ips:
+                    continue
                     
-            # 如果在采样IP中发现RPC，扫描整个/24网段
-            if found_rpc:
-                print(f"[扫描] 在{subnet}发现RPC节点，扫描整个子网")
-                for ip in subnet_ips:
-                    ip_str = str(ip)
-                    if ip_str not in potential_ips and is_potential_rpc(ip_str):
-                        potential_ips.append(ip_str)
-                        print(f"[发现] 发现潜在RPC节点: {ip_str}")
+                # 取每个/24网段的首、中、尾部IP进行检查
+                sample_ips = [
+                    str(subnet_ips[0]),
+                    str(subnet_ips[len(subnet_ips)//2]),
+                    str(subnet_ips[-1])
+                ]
+                
+                # 并行检查采样IP
+                sample_futures = []
+                for ip in sample_ips:
+                    sample_futures.append(executor.submit(is_potential_rpc, ip))
+                subnet_futures.append((subnet, sample_ips, sample_futures))
+            
+            # 处理采样结果
+            for subnet, sample_ips, sample_futures in subnet_futures:
+                found_rpc = False
+                for ip, future in zip(sample_ips, sample_futures):
+                    try:
+                        if future.result():
+                            potential_ips.append(ip)
+                            found_rpc = True
+                            print(f"[发现] 发现潜在RPC节点: {ip}")
+                    except Exception as e:
+                        print(f"[错误] 扫描IP {ip} 时出错: {e}")
+                
+                # 如果在采样IP中发现RPC，扫描整个/24网段
+                if found_rpc:
+                    print(f"[扫描] 在{subnet}发现RPC节点，扫描整个子网")
+                    subnet_ips = [str(ip) for ip in subnet.hosts()]
+                    
+                    # 并行扫描整个子网
+                    full_scan_futures = []
+                    for ip in subnet_ips:
+                        if ip not in potential_ips:  # 跳过已知的IP
+                            full_scan_futures.append(executor.submit(is_potential_rpc, ip))
+                    
+                    for ip, future in zip([ip for ip in subnet_ips if ip not in potential_ips], full_scan_futures):
+                        try:
+                            if future.result():
+                                potential_ips.append(ip)
+                                print(f"[发现] 发现潜在RPC节点: {ip}")
+                        except Exception as e:
+                            print(f"[错误] 扫描IP {ip} 时出错: {e}")
     
     return potential_ips
 
@@ -505,18 +541,20 @@ def get_optimal_thread_count() -> int:
         # 获取可用内存(GB)
         available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)
         
-        # 基础线程数：每个CPU核心2个线程
-        base_threads = cpu_count * 2
+        # 基础线程数：每个CPU核心4个线程（原来是2个）
+        base_threads = cpu_count * 4
         
         # 根据可用内存调整
-        # 假设每个线程大约需要50MB内存
-        memory_based_threads = int(available_memory * 1024 / 50)
+        # 假设每个线程大约需要30MB内存（原来是50MB）
+        memory_based_threads = int(available_memory * 1024 / 30)
         
-        # 取较小值，避免资源耗尽
-        optimal_threads = min(base_threads, memory_based_threads)
+        # 取较大值，允许更多线程（原来是取较小值）
+        optimal_threads = max(base_threads, memory_based_threads)
         
-        # 设置上下限
-        optimal_threads = max(5, min(optimal_threads, 100))
+        # 调整上下限
+        # 最小10个线程（原来是5个）
+        # 最大500个线程（原来是100个）
+        optimal_threads = max(10, min(optimal_threads, 500))
         
         print(f"[系统] CPU核心数: {cpu_count}")
         print(f"[系统] 可用内存: {available_memory:.1f}GB")
@@ -524,9 +562,9 @@ def get_optimal_thread_count() -> int:
         
         return optimal_threads
     except:
-        # 如果无法获取系统信息，返回保守的默认值
-        print("[系统] 无法获取系统信息，使用默认线程数: 10")
-        return 10
+        # 如果无法获取系统信息，返回默认值50（原来是10）
+        print("[系统] 无法获取系统信息，使用默认线程数: 50")
+        return 50
 
 def scan_ip(ip: str, provider: str, config: Dict) -> Dict:
     """扫描单个IP"""
